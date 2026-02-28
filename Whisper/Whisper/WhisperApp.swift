@@ -37,22 +37,13 @@ struct WhisperApp: App {
     }
 }
 
-struct TranscriptionQueueItem {
-    let samples: [Float]
-    let sampleRate: Double
-    let savedWindow: AXUIElement?
-    let savedAppPid: pid_t
-    let savedWindowId: CGWindowID
-    let savedWindowTitle: String
-}
-
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private let recorder = AudioRecorder()
     private var whisperKit: WhisperKit?
+    private var streamTranscriber: AudioStreamTranscriber?
+    private var lastStreamState: AudioStreamTranscriber.State?
     private var isRecording = false
-    private var isTranscribing = false
     private var flagsMonitor: Any?
     private var keyMonitor: Any?
     private var screenGlow: ScreenGlow?
@@ -63,14 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotkeyMenu: NSMenu?
     private var iconAnimationTimer: Timer?
     private var iconAnimationFrame: Int = 0
-    private var transcriptionQueue: [TranscriptionQueueItem] = []
-    private var chunkTimer: Timer?
-    private var lastChunkEndSample: Int = 0
-    private var accumulatedTranscription: String = ""
-    private var isChunkTranscribing = false
-    private let chunkDurationSeconds: Double = 5.0
-    private let overlapDurationSeconds: Double = 1.5
-    private var recordingSessionId: Int = 0
+    private var lastLiveText: String = ""
     private var selectedLanguage: String? {
         get { UserDefaults.standard.string(forKey: "selectedLanguage") }
         set {
@@ -408,6 +392,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             launcherPanel?.updateLoadingProgress(1.0)
             whisperKit = try await WhisperKit(modelFolder: modelPath.path)
+            NSSound(named: .init("Tink"))?.play()
             updateIcon(.ready)
             launcherPanel?.hideLoading()
         } catch {
@@ -421,97 +406,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startRecording() {
+        guard let wk = whisperKit, let tokenizer = wk.tokenizer else {
+            showNotification(title: "Whisper", message: "Model not loaded yet. Please wait.")
+            return
+        }
         logFocusInfo()
-        recorder.start()
         isRecording = true
-        recordingSessionId += 1
-        lastChunkEndSample = 0
-        accumulatedTranscription = ""
-        isChunkTranscribing = false
+        lastStreamState = nil
+        lastLiveText = ""
         updateIcon(.recording)
         statusItem.menu?.item(at: 0)?.title = "Stop Recording"
         screenGlow?.show(mode: .recording)
         launcherPanel?.showRecording()
-        startChunkTimer()
-    }
 
-    private func startChunkTimer() {
-        chunkTimer?.invalidate()
-        chunkTimer = Timer.scheduledTimer(withTimeInterval: chunkDurationSeconds, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.transcribeCurrentChunk()
-            }
-        }
-    }
-
-    private func transcribeCurrentChunk() {
-        guard isRecording, !isChunkTranscribing, let whisperKit else { return }
-
-        let sampleRate = recorder.sampleRate
-        let chunkSamples = Int(chunkDurationSeconds * sampleRate)
-        let overlapSamples = Int(overlapDurationSeconds * sampleRate)
-        let currentSampleCount = recorder.sampleCount()
-
-        guard currentSampleCount >= chunkSamples else { return }
-
-        let startSample = max(0, lastChunkEndSample - overlapSamples)
-        let samples = recorder.currentSamples()
-        guard startSample < samples.count else { return }
-
-        let chunkToTranscribe = Array(samples[startSample...])
-        lastChunkEndSample = samples.count
-
-        isChunkTranscribing = true
-        let sessionId = recordingSessionId
-        Task {
-            do {
-                let resampled = AudioProcessor.resampleTo16kHz(samples: chunkToTranscribe, fromRate: sampleRate)
-                var options = DecodingOptions(language: selectedLanguage)
-                options.verbose = false
-                let results = try await whisperKit.transcribe(audioArray: resampled, decodeOptions: options)
-                let chunkText = results.map { $0.text }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-
-                await MainActor.run {
-                    guard sessionId == recordingSessionId else { return }
-                    if !chunkText.isEmpty {
-                        accumulatedTranscription = mergeTranscriptions(existing: accumulatedTranscription, new: chunkText)
-                        launcherPanel?.updateLiveText(accumulatedTranscription)
-                    }
-                    isChunkTranscribing = false
-                }
-            } catch {
-                await MainActor.run {
-                    isChunkTranscribing = false
+        let transcriber = AudioStreamTranscriber(
+            audioEncoder: wk.audioEncoder,
+            featureExtractor: wk.featureExtractor,
+            segmentSeeker: wk.segmentSeeker,
+            textDecoder: wk.textDecoder,
+            tokenizer: tokenizer,
+            audioProcessor: wk.audioProcessor,
+            decodingOptions: DecodingOptions(language: selectedLanguage),
+            stateChangeCallback: { [weak self] _, newState in
+                Task { @MainActor [weak self] in
+                    self?.handleStreamState(newState)
                 }
             }
-        }
+        )
+        streamTranscriber = transcriber
+        Task { try? await transcriber.startStreamTranscription() }
     }
 
-    private func mergeTranscriptions(existing: String, new: String) -> String {
-        guard !existing.isEmpty else { return new }
-        guard !new.isEmpty else { return existing }
-
-        let existingWords = existing.split(separator: " ").map(String.init)
-        let newWords = new.split(separator: " ").map(String.init)
-
-        var overlapStart = -1
-        for i in 0..<min(existingWords.count, 5) {
-            let existingEnd = existingWords.suffix(existingWords.count - i)
-            for j in 0..<min(newWords.count, existingEnd.count) {
-                if Array(existingEnd.prefix(j + 1)) == Array(newWords.prefix(j + 1)) {
-                    overlapStart = i
-                    break
-                }
-            }
-            if overlapStart >= 0 { break }
-        }
-
-        if overlapStart >= 0 {
-            let existingPart = existingWords.prefix(overlapStart).joined(separator: " ")
-            return existingPart.isEmpty ? new : existingPart + " " + new
-        }
-
-        return existing + " " + new
+    private func handleStreamState(_ state: AudioStreamTranscriber.State) {
+        lastStreamState = state
+        guard isRecording else { return }
+        let confirmedText = state.confirmedSegments.map { $0.text }.joined()
+        let unconfirmedText = state.unconfirmedSegments.map { $0.text }.joined()
+        let liveText = stripTokens(confirmedText + unconfirmedText)
+        guard !liveText.isEmpty, liveText != lastLiveText else { return }
+        lastLiveText = liveText
+        launcherPanel?.updateLiveText(liveText)
     }
 
     private var savedWindow: AXUIElement?
@@ -540,23 +474,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func windowChanged() -> Bool {
-        guard let frontApp = NSWorkspace.shared.frontmostApplication else { return true }
-
-        if frontApp.processIdentifier != savedAppPid { return false }
-
-        let appRef = AXUIElementCreateApplication(frontApp.processIdentifier)
-        var focusedWindowRef: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(appRef, kAXFocusedWindowAttribute as CFString, &focusedWindowRef)
-
-        guard result == .success, let window = focusedWindowRef else { return false }
-
-        var currentWindowId: CGWindowID = 0
-        _ = _AXUIElementGetWindow(window as! AXUIElement, &currentWindowId)
-
-        return currentWindowId != savedWindowId
-    }
-
     private func copyToClipboard(_ text: String) {
         let pb = NSPasteboard.general
         pb.declareTypes([.string], owner: nil)
@@ -564,127 +481,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func stopRecording(cancel: Bool = false) {
-        chunkTimer?.invalidate()
-        chunkTimer = nil
-
-        let allSamples = recorder.stop()
-        let sampleRate = recorder.sampleRate
+        guard isRecording else { return }
         isRecording = false
         statusItem.menu?.item(at: 0)?.title = "Start Recording"
 
+        let transcriber = streamTranscriber
+        streamTranscriber = nil
+
         if cancel {
-            accumulatedTranscription = ""
+            Task { await transcriber?.stopStreamTranscription() }
+            lastStreamState = nil
             launcherPanel?.hideLiveText()
-            if !isTranscribing {
-                screenGlow?.hide()
-                launcherPanel?.resetToIdle()
-                updateIcon(.ready)
-            }
-            return
-        }
-
-        guard !allSamples.isEmpty else {
-            accumulatedTranscription = ""
-            if !isTranscribing {
-                screenGlow?.hide()
-                launcherPanel?.resetToIdle()
-                updateIcon(.ready)
-            }
-            return
-        }
-
-        let duration = Double(allSamples.count) / sampleRate
-
-        if duration < minRecordSeconds {
-            accumulatedTranscription = ""
-            if !isTranscribing {
-                screenGlow?.hide()
-                launcherPanel?.resetToIdle()
-                updateIcon(.ready)
-            }
-            showNotification(title: "Whisper", message: "Recording too short. Hold the hotkey longer.")
-            return
-        }
-
-        let overlapSamples = Int(overlapDurationSeconds * sampleRate)
-        let startSample = max(0, lastChunkEndSample - overlapSamples)
-        let remainingSamples = startSample < allSamples.count ? Array(allSamples[startSample...]) : []
-
-        let queueItem = TranscriptionQueueItem(
-            samples: remainingSamples.isEmpty ? allSamples : remainingSamples,
-            sampleRate: sampleRate,
-            savedWindow: savedWindow,
-            savedAppPid: savedAppPid,
-            savedWindowId: savedWindowId,
-            savedWindowTitle: savedWindowTitle
-        )
-        transcriptionQueue.append(queueItem)
-
-        if !isTranscribing {
-            processNextInQueue()
-        } else {
-            updateIcon(.transcribing)
-            screenGlow?.show(mode: .transcribing)
-            launcherPanel?.showTranscribing()
-        }
-    }
-
-    private func processNextInQueue() {
-        guard !transcriptionQueue.isEmpty else {
-            isTranscribing = false
             screenGlow?.hide()
             launcherPanel?.resetToIdle()
             updateIcon(.ready)
             return
         }
 
-        let item = transcriptionQueue.removeFirst()
-        isTranscribing = true
         updateIcon(.transcribing)
         screenGlow?.show(mode: .transcribing)
-        launcherPanel?.showTranscribing()
 
         Task {
-            await transcribe(item: item)
+            await transcriber?.stopStreamTranscription()
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            await MainActor.run { [weak self] in self?.finalizeSpeech() }
         }
     }
 
-    private func transcribe(item: TranscriptionQueueItem) async {
-        guard let whisperKit else {
-            processNextInQueue()
+    private func stripTokens(_ text: String) -> String {
+        text.replacingOccurrences(of: "<\\|[^|]+\\|>", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func finalizeSpeech() {
+        let confirmedText = lastStreamState?.confirmedSegments.map { $0.text }.joined() ?? ""
+        let unconfirmedText = lastStreamState?.unconfirmedSegments.map { $0.text }.joined() ?? ""
+        let finalText = stripTokens(confirmedText + " " + unconfirmedText)
+        lastStreamState = nil
+
+        if finalText.isEmpty {
+            showNotification(title: "Whisper", message: "No speech detected. Try again.")
+            screenGlow?.hide()
+            launcherPanel?.resetToIdle()
+            updateIcon(.ready)
             return
         }
 
-        do {
-            let resampled = AudioProcessor.resampleTo16kHz(samples: item.samples, fromRate: item.sampleRate)
-            let options = DecodingOptions(language: selectedLanguage)
-
-            let results = try await whisperKit.transcribe(audioArray: resampled, decodeOptions: options)
-            let chunkText = results.map { $0.text }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-
-            let finalText = mergeTranscriptions(existing: accumulatedTranscription, new: chunkText)
-            accumulatedTranscription = ""
-
-            if finalText.isEmpty {
-                showNotification(title: "Whisper", message: "No speech detected. Try again.")
-            } else {
-                saveTranscript(finalText)
-                restoreWindow(item: item)
-                copyAndPaste(finalText)
-                launcherPanel?.hideLiveText()
-            }
-        } catch {
-            showNotification(title: "Whisper", message: "Transcription failed: \(error.localizedDescription)")
-        }
-
-        launcherPanel?.dequeueOne()
-        processNextInQueue()
+        saveTranscript(finalText)
+        restoreWindow()
+        copyAndPaste(finalText)
+        NSSound(named: .init("Pop"))?.play()
+        launcherPanel?.hideLiveText()
+        screenGlow?.hide()
+        launcherPanel?.resetToIdle()
+        updateIcon(.ready)
     }
 
-    private func restoreWindow(item: TranscriptionQueueItem) {
-        guard let window = item.savedWindow else { return }
-        guard let app = NSRunningApplication(processIdentifier: item.savedAppPid) else { return }
-
+    private func restoreWindow() {
+        guard let window = savedWindow else { return }
+        guard let app = NSRunningApplication(processIdentifier: savedAppPid) else { return }
         app.activate()
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
@@ -828,58 +683,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit() {
         NSApplication.shared.terminate(nil)
-    }
-}
-
-final class AudioRecorder: @unchecked Sendable {
-    private let engine = AVAudioEngine()
-    private(set) var sampleRate: Double = 16000
-    private var samples: [Float] = []
-    private let lock = NSLock()
-
-    func start() {
-        lock.lock()
-        samples.removeAll()
-        lock.unlock()
-
-        let input = engine.inputNode
-        let format = input.inputFormat(forBus: 0)
-        sampleRate = format.sampleRate
-
-        input.removeTap(onBus: 0)
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            guard let self, let channelData = buffer.floatChannelData else { return }
-            let frameLength = Int(buffer.frameLength)
-            self.lock.lock()
-            self.samples.append(contentsOf: UnsafeBufferPointer(start: channelData[0], count: frameLength))
-            self.lock.unlock()
-        }
-
-        engine.prepare()
-        try? engine.start()
-    }
-
-    func stop() -> [Float] {
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        lock.lock()
-        let result = samples
-        lock.unlock()
-        return result
-    }
-
-    func currentSamples() -> [Float] {
-        lock.lock()
-        let result = samples
-        lock.unlock()
-        return result
-    }
-
-    func sampleCount() -> Int {
-        lock.lock()
-        let count = samples.count
-        lock.unlock()
-        return count
     }
 }
 
