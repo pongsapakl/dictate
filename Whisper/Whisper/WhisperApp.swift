@@ -397,7 +397,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             launcherPanel?.updateLoadingProgress(0)
 
             let modelPath = try await WhisperKit.download(
-                variant: "large-v3",
+                variant: "openai_whisper-large-v3-v20240930_turbo_632MB",
                 downloadBase: modelFolder,
                 useBackgroundSession: false
             ) { progress in
@@ -494,21 +494,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let existingWords = existing.split(separator: " ").map(String.init)
         let newWords = new.split(separator: " ").map(String.init)
 
-        var overlapStart = -1
-        for i in 0..<min(existingWords.count, 5) {
-            let existingEnd = existingWords.suffix(existingWords.count - i)
-            for j in 0..<min(newWords.count, existingEnd.count) {
-                if Array(existingEnd.prefix(j + 1)) == Array(newWords.prefix(j + 1)) {
-                    overlapStart = i
-                    break
-                }
+        for overlapLen in stride(from: min(existingWords.count, newWords.count, 10), through: 1, by: -1) {
+            let existingSuffix = existingWords.suffix(overlapLen).map { $0.lowercased() }
+            let newPrefix = newWords.prefix(overlapLen).map { $0.lowercased() }
+            if existingSuffix == newPrefix {
+                let addition = newWords.dropFirst(overlapLen).joined(separator: " ")
+                return addition.isEmpty ? existing : existing + " " + addition
             }
-            if overlapStart >= 0 { break }
-        }
-
-        if overlapStart >= 0 {
-            let existingPart = existingWords.prefix(overlapStart).joined(separator: " ")
-            return existingPart.isEmpty ? new : existingPart + " " + new
         }
 
         return existing + " " + new
