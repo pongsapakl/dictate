@@ -1,21 +1,44 @@
+# ─── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.so
-
 .venv/
 venv/
 env/
 .env
 .python-version
-.DS_Store
 
-# Local run artifacts
+# ─── macOS ────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ─── Xcode: User-specific (NEVER commit — machine/developer specific) ─────────
+# Each developer has their own xcuserdata with window layouts, breakpoints, etc.
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
+
+# ─── Xcode: Build output ──────────────────────────────────────────────────────
+DerivedData/
+*.build/
+*.xcarchive
+*.dSYM
+*.dSYM.zip
+
+# ─── Xcode: App bundles ───────────────────────────────────────────────────────
+# Exception: .app inside the repo source is excluded, but actual build output is not
+*.app
+*.ipa
+
+# ─── Swift Package Manager ────────────────────────────────────────────────────
+# Package.resolved IS intentionally tracked for reproducible builds
+# .build/ is excluded above
+
+# ─── Local run artifacts ──────────────────────────────────────────────────────
 /.dictate_transcripts/
 *.log
 
-# Build artifacts
-*.app
+# ─── Distribution ─────────────────────────────────────────────────────────────
 *.pkg
-*.dSYM.zip
-*.xcarchive
 fastlane/report.xml
