@@ -55,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var iconAnimationTimer: Timer?
     private var iconAnimationFrame: Int = 0
     private var lastLiveText: String = ""
+    private var recordingSessionId: Int = 0
     private var selectedLanguage: String? {
         get { UserDefaults.standard.string(forKey: "selectedLanguage") }
         set {
@@ -414,6 +415,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         isRecording = true
         lastStreamState = nil
         lastLiveText = ""
+        recordingSessionId += 1
         updateIcon(.recording)
         statusItem.menu?.item(at: 0)?.title = "Stop Recording"
         screenGlow?.show(mode: .recording)
@@ -434,7 +436,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         )
         streamTranscriber = transcriber
-        Task { try? await transcriber.startStreamTranscription() }
+        Task {
+            do { try await transcriber.startStreamTranscription() } catch {
+                await MainActor.run { [weak self] in
+                    self?.showNotification(title: "Whisper", message: "Recording failed: \(error.localizedDescription)")
+                    self?.stopRecording(cancel: true)
+                }
+            }
+        }
     }
 
     private func handleStreamState(_ state: AudioStreamTranscriber.State) {
@@ -501,10 +510,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateIcon(.transcribing)
         screenGlow?.show(mode: .transcribing)
 
+        let sessionId = recordingSessionId
         Task {
             await transcriber?.stopStreamTranscription()
             try? await Task.sleep(nanoseconds: 300_000_000)
-            await MainActor.run { [weak self] in self?.finalizeSpeech() }
+            await MainActor.run { [weak self] in
+                guard self?.recordingSessionId == sessionId else { return }
+                self?.finalizeSpeech()
+            }
         }
     }
 
@@ -516,7 +529,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func finalizeSpeech() {
         let confirmedText = lastStreamState?.confirmedSegments.map { $0.text }.joined() ?? ""
         let unconfirmedText = lastStreamState?.unconfirmedSegments.map { $0.text }.joined() ?? ""
-        let finalText = stripTokens(confirmedText + " " + unconfirmedText)
+        let finalText = stripTokens([confirmedText, unconfirmedText].filter { !$0.isEmpty }.joined(separator: " "))
         lastStreamState = nil
 
         if finalText.isEmpty {
