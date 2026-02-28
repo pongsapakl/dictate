@@ -35,6 +35,9 @@ DerivedData/
 # Package.resolved IS intentionally tracked for reproducible builds
 # .build/ is excluded above
 
+# ─── Claude Code local config (personal, machine-specific) ───────────────────
+.claude/CLAUDE.local.md
+
 # ─── Local run artifacts ──────────────────────────────────────────────────────
 /.dictate_transcripts/
 *.log
