@@ -408,6 +408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             launcherPanel?.updateLoadingProgress(1.0)
             whisperKit = try await WhisperKit(modelFolder: modelPath.path)
+            NSSound(named: .init("Tink"))?.play()
             updateIcon(.ready)
             launcherPanel?.hideLoading()
         } catch {
@@ -663,6 +664,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 saveTranscript(finalText)
                 restoreWindow(item: item)
                 copyAndPaste(finalText)
+                NSSound(named: .init("Pop"))?.play()
                 launcherPanel?.hideLiveText()
             }
         } catch {
