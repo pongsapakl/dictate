@@ -14,7 +14,10 @@ Do not re-introduce `mergeTranscriptions`, `chunkTimer`, `AudioRecorder`, or `tr
 
 ## Model Variant — Use Exact Name
 
-Current model: `openai_whisper-large-v3-v20240930_turbo_632MB`
+Default model: `openai_whisper-large-v3-v20240930_turbo_632MB`
+Thai model: `openai_whisper-large-v3-v20240930_626MB` (full large-v3, not turbo — turbo's distillation disproportionately degrades Thai per OpenAI)
+
+`modelVariant(for:)` in `WhisperApp.swift` picks the variant by `selectedLanguage`. Changing language reloads the model via `reloadModelIfNeeded()`. The full large-v3 is slower per decode but more accurate on Thai; turbo stays the default for English and everything else.
 
 Original app used `large-v3`. This fork uses the turbo variant — 8x faster, similar accuracy, fits in 8GB RAM.
 

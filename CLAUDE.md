@@ -37,6 +37,10 @@ dictate.py                # main app
 source .venv/bin/activate && python dictate.py
 ```
 
+## Deploy Reminder
+
+After completing development work that the user wants to use daily, **remind them to deploy**: the Debug build runs from Xcode but the daily app at `/Applications/Whisper.app` is a separate Release build. Personal shortcut: `whisper-ship` (zsh function). See `.claude/CLAUDE.local.md` for details. Don't run it automatically — only after the user has confirmed the change works.
+
 ## Rules
 
 ### Multi-Agent Environment

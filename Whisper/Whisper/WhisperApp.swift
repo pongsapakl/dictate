@@ -25,8 +25,16 @@ let supportedLanguages: [(code: String?, name: String)] = [
     ("zh", "Chinese"),
     ("ja", "Japanese"),
     ("ko", "Korean"),
-    ("ar", "Arabic")
+    ("ar", "Arabic"),
+    ("th", "Thai")
 ]
+
+let defaultModelVariant = "openai_whisper-large-v3-v20240930_turbo_632MB"
+let thaiModelVariant = "openai_whisper-large-v3-v20240930_626MB"
+
+func modelVariant(for language: String?) -> String {
+    language == "th" ? thaiModelVariant : defaultModelVariant
+}
 
 @main
 struct WhisperApp: App {
@@ -56,6 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var iconAnimationFrame: Int = 0
     private var lastLiveText: String = ""
     private var recordingSessionId: Int = 0
+    private var loadedModelVariant: String?
     private var selectedLanguage: String? {
         get { UserDefaults.standard.string(forKey: "selectedLanguage") }
         set {
@@ -65,6 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 UserDefaults.standard.removeObject(forKey: "selectedLanguage")
             }
             updateLanguageMenu()
+            reloadModelIfNeeded()
         }
     }
     private var languageMenu: NSMenu?
@@ -90,6 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        terminateOtherInstances()
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { _, _ in }
         requestPermissions()
         setupStatusItem()
@@ -291,6 +302,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func reloadModelIfNeeded() {
+        let desired = modelVariant(for: selectedLanguage)
+        guard desired != loadedModelVariant else { return }
+        if isRecording { stopRecording() }
+        whisperKit = nil
+        streamTranscriber = nil
+        launcherPanel?.showLoading()
+        updateIcon(.loading)
+        Task { await loadWhisperModel() }
+    }
+
+    private func terminateOtherInstances() {
+        let myPID = ProcessInfo.processInfo.processIdentifier
+        let bundleID = Bundle.main.bundleIdentifier ?? ""
+        NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .filter { $0.processIdentifier != myPID }
+            .forEach { $0.terminate() }
+    }
+
     private func totalTranscriptionCount() -> Int {
         transcriptionStore.count()
     }
@@ -381,8 +411,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             launcherPanel?.updateLoadingProgress(0)
 
+            let variant = modelVariant(for: selectedLanguage)
             let modelPath = try await WhisperKit.download(
-                variant: "openai_whisper-large-v3-v20240930_turbo_632MB",
+                variant: variant,
                 downloadBase: modelFolder,
                 useBackgroundSession: false
             ) { progress in
@@ -393,6 +424,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             launcherPanel?.updateLoadingProgress(1.0)
             whisperKit = try await WhisperKit(modelFolder: modelPath.path)
+            loadedModelVariant = variant
             NSSound(named: .init("Tink"))?.play()
             updateIcon(.ready)
             launcherPanel?.hideLoading()
