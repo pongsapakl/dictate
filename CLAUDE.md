@@ -23,6 +23,14 @@
 - AXFocusedWindow - works for cross-app, but iTerm returns same ID for all windows
 - AppleScript for iTerm - "Not authorized to send Apple events"
 
+### Unify on Single Model — Investigation Pending
+
+Today: `modelVariant(for:)` swaps between turbo (default) and full large-v3 626MB (Thai). It works but the per-language reload is mildly unclean — model swap on every Thai⇆English switch, two cached models on disk, branching logic.
+
+Cleaner alternative: use full large-v3 626MB for *everything*. Same model handles English and Thai well, no swap, no reload. Cost is decode latency — full v3 has 32 decoder layers vs turbo's 4, so per-utterance wait grows ~3-5×.
+
+**Need to experiment:** measure daily English latency on full v3 with M1 8GB and `AudioStreamTranscriber`. If the added wait is bearable (say <2× current perceived wait), drop the per-language logic and standardize on full v3. If not, keep the split. Decision should be based on real usage, not benchmarks — the question is "does it feel slow" rather than "is it slow in ms."
+
 ## Structure
 
 ```
