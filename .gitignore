@@ -37,6 +37,7 @@ DerivedData/
 
 # ─── Claude Code local config (personal, machine-specific) ───────────────────
 .claude/CLAUDE.local.md
+.claude/local-notes/
 
 # ─── Local run artifacts ──────────────────────────────────────────────────────
 /.dictate_transcripts/
