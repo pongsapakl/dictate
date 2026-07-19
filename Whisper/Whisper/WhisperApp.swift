@@ -46,7 +46,7 @@ struct WhisperApp: App {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var whisperKit: WhisperKit?
     private var streamTranscriber: AudioStreamTranscriber?
@@ -78,6 +78,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     private var languageMenu: NSMenu?
+    private var micMenu: NSMenu?
+    private var selectedMicrophone: String? {
+        get { UserDefaults.standard.string(forKey: "selectedMicrophone") }
+        set {
+            if let value = newValue {
+                UserDefaults.standard.set(value, forKey: "selectedMicrophone")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "selectedMicrophone")
+            }
+            updateMicMenu()
+        }
+    }
     private var recentMenu: NSMenu?
     private var recentTranscriptions: [TranscriptionRecord] = []
     private let transcriptionStore = TranscriptionStore()
@@ -181,7 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             let (samples, sampleRate) = try await decodeAudioFile(url: url)
-            let resampled = AudioProcessor.resampleTo16kHz(samples: samples, fromRate: sampleRate)
+            let resampled = AudioResampler.resampleTo16kHz(samples: samples, fromRate: sampleRate)
             let options = DecodingOptions(language: selectedLanguage)
             let results = try await whisperKit!.transcribe(audioArray: resampled, decodeOptions: options)
             let text = results.map { $0.text }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
@@ -229,6 +241,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         langItem.submenu = languageMenu
         statusMenu?.addItem(langItem)
         updateLanguageMenu()
+
+        let micItem = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
+        micMenu = NSMenu()
+        micMenu?.delegate = self
+        micItem.submenu = micMenu
+        statusMenu?.addItem(micItem)
+        updateMicMenu()
 
         let recentItem = NSMenuItem(title: "Recent Transcriptions", action: nil, keyEquivalent: "")
         recentMenu = NSMenu()
@@ -278,6 +297,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func selectLanguage(_ sender: NSMenuItem) {
         selectedLanguage = sender.representedObject as? String
+    }
+
+    @objc private func selectMicrophone(_ sender: NSMenuItem) {
+        selectedMicrophone = sender.representedObject as? String
+    }
+
+    private func updateMicMenu() {
+        guard let micMenu else { return }
+        micMenu.removeAllItems()
+        let defaultItem = NSMenuItem(title: "System Default", action: #selector(selectMicrophone(_:)), keyEquivalent: "")
+        defaultItem.target = self
+        defaultItem.state = selectedMicrophone == nil ? .on : .off
+        micMenu.addItem(defaultItem)
+        micMenu.addItem(.separator())
+        for device in SelectableInputAudioProcessor.inputDevices() {
+            let item = NSMenuItem(title: device.name, action: #selector(selectMicrophone(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = device.name
+            item.state = device.name == selectedMicrophone ? .on : .off
+            micMenu.addItem(item)
+        }
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        if menu == micMenu { updateMicMenu() }
     }
 
     @objc private func selectHotkey(_ sender: NSMenuItem) {
@@ -423,7 +467,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             launcherPanel?.updateLoadingProgress(1.0)
-            whisperKit = try await WhisperKit(modelFolder: modelPath.path)
+            whisperKit = try await WhisperKit(modelFolder: modelPath.path, audioProcessor: SelectableInputAudioProcessor())
             loadedModelVariant = variant
             NSSound(named: .init("Tink"))?.play()
             updateIcon(.ready)
