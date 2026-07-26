@@ -33,6 +33,36 @@ WhisperKit 0.15.0 includes raw special tokens in `TranscriptionSegment.text` (e.
 
 When recording stops, `AudioStreamTranscriber` may still be running one final decode. We wait 300ms after `stopStreamTranscription()` before reading `lastStreamState`. Removing this causes the last few words of speech to be cut off.
 
+The 300ms wait is necessary but was never sufficient — see `transcribeTail()` below.
+
+## Tail Flush On Stop — Do Not Remove
+
+`stopStreamTranscription()` does not flush. Up to ~1s of trailing audio is never
+submitted to the decoder (`nextBufferSeconds > 1` guard), the decoder itself stops
+`windowClipTime` (1.0s) short of the end, and anything captured during the final
+in-flight decode is dropped. None of that is recoverable by waiting longer.
+
+`transcribeTail()` in `WhisperApp.swift` re-decodes from `lastConfirmedSegmentEndSeconds`
+to the end of `audioProcessor.audioSamples` with `windowClipTime = 0`, and
+`finalizeSpeech()` prefers that over the unconfirmed segments. This relies on
+`stopRecording()` not clearing `audioSamples` — verified in WhisperKit 0.15.0
+`AudioProcessor.swift:1078`. Re-verify on WhisperKit upgrade.
+
+See `docs/transcription-issues.md` Issues 4-6 for the full analysis.
+
+## Stream Tuning Parameters
+
+`AudioStreamTranscriber` is constructed with non-default values:
+
+- `requiredSegmentsForConfirmation: 1` (WhisperKit default 2). At the default, a long
+  run-on sentence yields too few segments to ever confirm, so `clipTimestamps` stays
+  at 0 and every pass re-decodes the whole utterance. Cost then grows with utterance
+  length — this was the "hangs on long sentences" symptom.
+- `silenceThreshold: 0.15` (default 0.3). `relativeEnergy` is normalized against the
+  running noise floor, so a noisier input device scores identical speech lower. The
+  default gated transcribe passes on an external mic. If it still gates, pass
+  `useVAD: false` — for push-to-talk dictation, voice-activity gating buys little.
+
 ## Live Text Throttle — Do Not Remove
 
 `stateChangeCallback` fires per-token during decoding — dozens of times per second. The `lastLiveText` guard in `handleStreamState` prevents calling `launcherPanel?.updateLiveText()` unless text actually changed. Removing this causes AppKit layout recursion warnings and UI thrashing.

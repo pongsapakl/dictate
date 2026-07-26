@@ -63,6 +63,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var iconAnimationTimer: Timer?
     private var iconAnimationFrame: Int = 0
     private var lastLiveText: String = ""
+    private var tailText: String = ""
+    private let waitingForSpeechText = "Waiting for speech..."
     private var recordingSessionId: Int = 0
     private var loadedModelVariant: String?
     private var selectedLanguage: String? {
@@ -491,6 +493,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         isRecording = true
         lastStreamState = nil
         lastLiveText = ""
+        tailText = ""
         recordingSessionId += 1
         updateIcon(.recording)
         statusItem.menu?.item(at: 0)?.title = "Stop Recording"
@@ -505,6 +508,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             tokenizer: tokenizer,
             audioProcessor: wk.audioProcessor,
             decodingOptions: DecodingOptions(language: selectedLanguage),
+            requiredSegmentsForConfirmation: 1,
+            silenceThreshold: 0.15,
             stateChangeCallback: { [weak self] _, newState in
                 Task { @MainActor [weak self] in
                     self?.handleStreamState(newState)
@@ -526,8 +531,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lastStreamState = state
         guard isRecording else { return }
         let confirmedText = state.confirmedSegments.map { $0.text }.joined()
-        let unconfirmedText = state.unconfirmedSegments.map { $0.text }.joined()
-        let liveText = stripTokens(confirmedText + unconfirmedText)
+        let decodingText = state.currentText == waitingForSpeechText ? "" : state.currentText
+        let liveTail = decodingText.isEmpty ? state.unconfirmedSegments.map { $0.text }.joined() : decodingText
+        let liveText = stripTokens(confirmedText + liveTail)
         guard !liveText.isEmpty, liveText != lastLiveText else { return }
         lastLiveText = liveText
         launcherPanel?.updateLiveText(liveText)
@@ -590,11 +596,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Task {
             await transcriber?.stopStreamTranscription()
             try? await Task.sleep(nanoseconds: 300_000_000)
+            await transcribeTail()
             await MainActor.run { [weak self] in
                 guard self?.recordingSessionId == sessionId else { return }
                 self?.finalizeSpeech()
             }
         }
+    }
+
+    private func transcribeTail() async {
+        tailText = ""
+        guard let wk = whisperKit, let state = lastStreamState else { return }
+        let samples = Array(wk.audioProcessor.audioSamples)
+        let start = Int(state.lastConfirmedSegmentEndSeconds * Float(WhisperKit.sampleRate))
+        guard start < samples.count else { return }
+        var options = DecodingOptions(language: selectedLanguage)
+        options.windowClipTime = 0
+        let results = try? await wk.transcribe(audioArray: Array(samples[start...]), decodeOptions: options)
+        tailText = results?.map { $0.text }.joined() ?? ""
     }
 
     private func stripTokens(_ text: String) -> String {
@@ -605,7 +624,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func finalizeSpeech() {
         let confirmedText = lastStreamState?.confirmedSegments.map { $0.text }.joined() ?? ""
         let unconfirmedText = lastStreamState?.unconfirmedSegments.map { $0.text }.joined() ?? ""
-        let finalText = stripTokens([confirmedText, unconfirmedText].filter { !$0.isEmpty }.joined(separator: " "))
+        let trailingText = stripTokens(tailText).isEmpty ? unconfirmedText : tailText
+        let finalText = stripTokens([confirmedText, trailingText].filter { !$0.isEmpty }.joined(separator: " "))
         lastStreamState = nil
 
         if finalText.isEmpty {

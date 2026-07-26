@@ -94,3 +94,127 @@ Use `NSSound` to play macOS system sounds at key moments:
 NSSound(named: .init("Tink"))?.play()  // after whisperKit loads
 NSSound(named: .init("Pop"))?.play()   // after copyAndPaste completes
 ```
+
+---
+
+# Streaming era (AudioStreamTranscriber)
+
+Issues 1–3 above describe the old chunk+merge implementation and are historical.
+Issues 4–6 apply to the current `AudioStreamTranscriber` design. Line references are
+WhisperKit 0.15.0 (`664e1b5`).
+
+## Issue 4: End of Speech Is Cut Off
+
+### What
+The last few words of an utterance are missing from the pasted result. Worse on
+long utterances and on slower decodes.
+
+### Why
+Three independent causes stack, and none of them is the 300ms wait:
+
+1. **The stream loop never submits the trailing audio.**
+   `AudioStreamTranscriber.transcribeCurrentBuffer` (:132) only transcribes once
+   at least 1 second of *new* audio has arrived:
+   ```swift
+   guard nextBufferSeconds > 1 else { ... sleep 100ms; return }
+   ```
+   So at any instant, up to ~1s of the most recent audio has never been decoded.
+
+2. **The decoder deliberately stops 1 second short of the end.**
+   `TranscribeTask` (:122-125) uses `windowClipTime` (default `1.0`,
+   `Configurations.swift:176`) to avoid end-of-clip hallucinations:
+   ```swift
+   let windowPadding = Int(options.windowClipTime * Float(WhisperKit.sampleRate))
+   while seek < seekClipEnd - windowPadding {
+   ```
+
+3. **`stopStreamTranscription()` does not flush.** It sets `isRecording = false`
+   and stops the mic (:89-93). The realtime loop simply exits. Audio captured
+   during the final in-flight decode is discarded — unbounded, and it grows with
+   decode latency. This is why the symptom worsened when decodes got slower.
+
+The `300ms` sleep in `WhisperApp.stopRecording` only gives an already-running
+decode a chance to land. It cannot recover audio that was never fed to the
+decoder, so it does not address any of the three causes.
+
+### Fix
+`transcribeTail()` in `WhisperApp.swift`: after stopping, re-decode the audio from
+`state.lastConfirmedSegmentEndSeconds` to the end of `audioProcessor.audioSamples`
+with `windowClipTime = 0`, and use that in place of the unconfirmed segments.
+`stopRecording()` does not clear `audioSamples` (`AudioProcessor.swift:1078`), so
+the full recording is still available at that point.
+
+## Issue 5: Long Sentences Hang
+
+### What
+The longer the sentence, the longer the pause before text appears.
+
+### Why
+`transcribeAudioSamples` (:192-194) sets `clipTimestamps = [lastConfirmedSegmentEndSeconds]`,
+and `TranscribeTask` starts its seek there. If confirmation never advances, every
+pass re-decodes the whole utterance from zero.
+
+Confirmation is gated on segment count (:166):
+```swift
+if segments.count > requiredSegmentsForConfirmation   // default 2
+```
+A long, run-on sentence produces 1–2 segments, so nothing is ever confirmed,
+`lastConfirmedSegmentEndSeconds` stays at 0, and cost grows with utterance length.
+Each pass also re-decodes a full 30s-padded window regardless of actual length.
+
+### Fix
+`requiredSegmentsForConfirmation: 1` so the seek point advances and each pass only
+decodes new audio.
+
+## Issue 6: Live Text Does Not Stream
+
+### What
+Text appears in one block per decode pass rather than flowing.
+
+### Why
+`handleStreamState` read only `confirmedSegments` and `unconfirmedSegments`, which
+are assigned only at the *end* of a pass (:185, :188). `state.currentText`, which
+`onProgressCallback` (:119) updates per token during decoding, was ignored. So the
+UI froze for the entire decode — and Issue 5 made that window grow.
+
+### Fix
+Prefer `state.currentText` for the trailing portion while a decode is in flight,
+falling back to `unconfirmedSegments` when idle. `currentText` also carries the
+sentinel `"Waiting for speech..."` (:134, :149), which must be filtered out.
+
+## Why an External Microphone Made This Worse
+
+**Unverified — mechanism is in the code, but not measured on this machine's mic.**
+
+VAD gates every transcribe pass (:139-153) on `relativeEnergy` exceeding
+`silenceThreshold` (default `0.3`). `relativeEnergy` is not absolute loudness — it
+is normalized against the *running noise floor* (`AudioProcessor.swift:905`, `:718-735`):
+
+```
+reference = min avg energy over the last ~2s
+relative  = (dB(signal) - dB(reference)) / (0 - dB(reference))
+```
+
+A higher noise floor shrinks both the numerator and the denominator's range, so
+identical speech scores lower:
+
+| noise floor | reference | speech @ RMS 0.05 | relative | > 0.3? |
+|---|---|---|---|---|
+| 0.001 (quiet room, built-in) | -60 dB | -26 dB | 0.57 | yes |
+| 0.01  | -40 dB | -26 dB | 0.35 | barely |
+| 0.02  | -34 dB | -26 dB | 0.24 | **no** |
+
+When VAD returns false the loop sleeps 100ms and — critically — does **not** update
+`state.lastBufferSize` (:157 runs only after the guard), so the untranscribed
+backlog keeps growing. That delays the first decode, inflates every later decode
+(Issue 5), and enlarges what is lost at stop (Issue 4).
+
+Mitigation applied: `silenceThreshold: 0.15`. If the mic's floor is high enough
+that this is still gated, pass `useVAD: false` — for push-to-talk dictation the
+user is deliberately recording, so gating on voice activity buys little.
+
+### How to check
+Set `Logging.shared.logLevel = .debug` at startup and watch Console.app. A flood of
+`"No voice detected, skipping transcribe"` while actually speaking confirms the
+VAD path is the bottleneck. `state.bufferEnergy` in `handleStreamState` carries the
+same numbers if in-app logging is preferred.
