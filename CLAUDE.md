@@ -4,8 +4,8 @@
 
 ### Real-Time Transcription vs Accuracy
 
-Post-release wait is now ~1-2s (was "several seconds"), measured on the external-mic
-clamshell setup after the streaming fixes. It breaks down as:
+Post-release wait is now ~1-2s (was "several seconds") after the streaming fixes,
+measured on Apple silicon with the full large-v3 model. It breaks down as:
 
 - ~400ms deliberate wait keeping the mic open past hotkey release
 - ~0.3-1s for `transcribeTail()`, one real decode pass over the unconfirmed tail

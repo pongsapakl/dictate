@@ -184,7 +184,7 @@ sentinel `"Waiting for speech..."` (:134, :149), which must be filtered out.
 
 ## Why an External Microphone Made This Worse
 
-**Unverified — mechanism is in the code, but not measured on this machine's mic.**
+**Unverified — the mechanism is in the code, but was not measured against a real device.**
 
 VAD gates every transcribe pass (:139-153) on `relativeEnergy` exceeding
 `silenceThreshold` (default `0.3`). `relativeEnergy` is not absolute loudness — it

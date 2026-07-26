@@ -2,12 +2,16 @@
 
 ## What This Fork Is
 
-Personal fork of `soliblue/dictate` for local use on a single machine. Not intended for distribution, App Store, or sharing with others.
+Fork of `soliblue/dictate` for local use. Not intended for distribution, App Store, or
+redistribution.
 
 **This fork:**
-- Runs on one MacBook Air M1 (8GB)
-- Used daily as a personal dictation tool
+- Targets Apple silicon with constrained RAM; model choices assume that budget
 - May diverge significantly from upstream
+
+Hardware specifics and operator setup live in `.claude/local-notes/` (untracked).
+See `.claude/rules/publishing-safety.md` before adding anything environment-specific
+to a tracked file.
 
 **This fork is NOT:**
 - A maintained distribution of the original app

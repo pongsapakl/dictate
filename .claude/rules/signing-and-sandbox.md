@@ -6,35 +6,30 @@ Ad-hoc signing (`"-"`) does not embed entitlements. The sandbox is not enforced,
 
 Use `CODE_SIGN_IDENTITY = "Apple Development"` — entitlements are embedded, sandbox is enforced.
 
-### Known drift — the working tree may override this
+### Verify what you shipped, don't trust the committed settings
 
-As of 2026-07-26 the *committed* `project.pbxproj` has `Apple Development` +
-`CODE_SIGN_STYLE = Automatic` (commit `714da79`), but the local working tree carries an
-uncommitted change flipping macOS builds to `"-"` + `Manual` with
-`DEVELOPMENT_TEAM[sdk=macosx*]`. Every shipped build has therefore been **ad-hoc**.
-
-Verify what you actually shipped, don't trust the committed settings:
+A local working tree can override the committed signing config, so check the artifact:
 ```
 codesign -dv /Applications/Whisper.app 2>&1 | grep -E "Signature|TeamIdentifier"
 ```
-`Signature=adhoc` / `TeamIdentifier=not set` means the override is active.
+`Signature=adhoc` / `TeamIdentifier=not set` means an ad-hoc override is active.
 
 Two corrections to the claim above, measured rather than assumed:
-- Entitlements **are** present under ad-hoc signing here (`com.apple.security.app-sandbox`
-  is embedded) and models do live in the sandbox container. The "models escape to
-  `~/Library/Application Support/Models/`" failure has not been observed on this machine.
+- Entitlements **are** embedded under ad-hoc signing, and a sandboxed ad-hoc build does
+  keep its models in the container. The "models escape to
+  `~/Library/Application Support/Models/`" failure was not reproduced.
 - The real cost of ad-hoc is elsewhere: an ad-hoc signature is a hash of the binary, so it
-  changes on **every build**. The CoreML ANE bundle cache
-  (`Containers/soli.whisper.Whisper/Data/Library/Caches/.../com.apple.e5rt.e5bundlecache`,
-  ~557MB) was observed rebuilding from scratch at deploy time, which is the "model is
-  loading slowly again" symptom. The model files themselves are not re-downloaded.
+  changes on **every build**. Two things were observed breaking on every deploy as a
+  result — the CoreML ANE bundle cache (~550MB) rebuilding from scratch, which presents as
+  "the model is loading slowly again", and TCC grants silently ceasing to match. The model
+  files themselves are never re-downloaded.
 
-Note the committed config does **not** build on its own — it pairs `Apple Development`
-with `DEVELOPMENT_TEAM = ""` and fails with "requires a development team". Restoring
-proper signing means keeping the team line and changing only the identity and style.
+Note that `CODE_SIGN_IDENTITY = "Apple Development"` paired with `DEVELOPMENT_TEAM = ""`
+does **not** build — it fails with "requires a development team". A team must be supplied
+locally; see `.claude/local-notes/`.
 
-Unproven: that the ANE cache is keyed on code signature. The timing matches exactly but
-was not isolated. Confirming it needs two consecutive deploys after switching to stable
+Unproven: that the ANE cache is keyed on code signature specifically. The timing matched
+exactly but was never isolated. Confirming it needs two consecutive deploys under stable
 signing — the first rebuilds the cache regardless.
 
 ## The App Is Not Sandboxed — Do Not Re-enable
@@ -60,8 +55,8 @@ single-machine fork, never App Store, never distributed.
 ### But keep `com.apple.security.device.audio-input`
 
 **This one is NOT sandbox-scoped.** With `ENABLE_HARDENED_RUNTIME = YES`, the Hardened
-Runtime requires it for microphone access independently of the sandbox. Removing it was
-a mistake made on 2026-07-26 and it broke the microphone entirely:
+Runtime requires it for microphone access independently of the sandbox. Removing it breaks
+the microphone entirely:
 
 ```
 kTCCServiceMicrophone requires entitlement com.apple.security.device.audio-input
