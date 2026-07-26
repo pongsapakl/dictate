@@ -57,11 +57,34 @@ code signatures, or permission resets — check the entitlements first.
 The sandbox costs nothing to drop here: per `fork-context.md` this is a personal
 single-machine fork, never App Store, never distributed.
 
-The other entitlements removed alongside it (`device.audio-input`,
-`files.user-selected.read-write`, `network.client`,
-`temporary-exception.apple-events`) were all sandbox-scoped and inert without it.
-Microphone access outside the sandbox comes from
-`INFOPLIST_KEY_NSMicrophoneUsageDescription` in build settings, which is still set.
+### But keep `com.apple.security.device.audio-input`
+
+**This one is NOT sandbox-scoped.** With `ENABLE_HARDENED_RUNTIME = YES`, the Hardened
+Runtime requires it for microphone access independently of the sandbox. Removing it was
+a mistake made on 2026-07-26 and it broke the microphone entirely:
+
+```
+kTCCServiceMicrophone requires entitlement com.apple.security.device.audio-input
+but it is missing for requesting={soli.whisper.Whisper}
+Policy disallows prompt ... access to kTCCServiceMicrophone denied
+```
+
+The failure mode is nastier than a plain denial: TCC refuses to even *show* the prompt,
+and the Microphone pane in System Settings has no `+` button, so the permission becomes
+impossible to grant through the UI. `NSMicrophoneUsageDescription` being present is
+necessary but not sufficient — the entitlement gates the prompt itself.
+
+Correct combination for this app: **hardened runtime on, sandbox off, audio-input on.**
+
+The genuinely sandbox-scoped entitlements (`files.user-selected.read-write`,
+`network.client`, `temporary-exception.apple-events`) stay removed; they are inert
+without the sandbox.
+
+Diagnose microphone problems by streaming TCC decisions, which name the missing
+entitlement outright:
+```
+/usr/bin/log stream --predicate 'subsystem == "com.apple.TCC" AND eventMessage CONTAINS[c] "whisper"'
+```
 
 ## Storage Location Followed the Sandbox
 
