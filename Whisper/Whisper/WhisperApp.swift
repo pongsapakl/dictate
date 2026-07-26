@@ -594,8 +594,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let sessionId = recordingSessionId
         Task {
+            try? await Task.sleep(nanoseconds: 400_000_000)
             await transcriber?.stopStreamTranscription()
-            try? await Task.sleep(nanoseconds: 300_000_000)
             await transcribeTail()
             await MainActor.run { [weak self] in
                 guard self?.recordingSessionId == sessionId else { return }

@@ -31,9 +31,15 @@ WhisperKit 0.15.0 includes raw special tokens in `TranscriptionSegment.text` (e.
 
 ## 300ms Wait After Stop — Do Not Remove
 
-When recording stops, `AudioStreamTranscriber` may still be running one final decode. We wait 300ms after `stopStreamTranscription()` before reading `lastStreamState`. Removing this causes the last few words of speech to be cut off.
+When recording stops, `AudioStreamTranscriber` may still be running one final decode. We wait before reading `lastStreamState`. Removing this causes the last few words of speech to be cut off.
 
-The 300ms wait is necessary but was never sufficient — see `transcribeTail()` below.
+**The wait must come BEFORE `stopStreamTranscription()`, not after.** `stopStreamTranscription()`
+tears down the audio engine immediately, so waiting afterwards captures nothing — audio
+still in flight when the hotkey is released is lost at the hardware/tap layer and is not
+recoverable by any later decode. Waiting first keeps the mic open ~400ms past key release,
+which covers CoreAudio tap latency and a slightly early release.
+
+The wait is necessary but not sufficient on its own — see `transcribeTail()` below.
 
 ## Tail Flush On Stop — Do Not Remove
 
