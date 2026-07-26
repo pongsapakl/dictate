@@ -37,14 +37,46 @@ Unproven: that the ANE cache is keyed on code signature. The timing matches exac
 was not isolated. Confirming it needs two consecutive deploys after switching to stable
 signing — the first rebuilds the cache regardless.
 
-## All Builds Share the Same Container
+## The App Is Not Sandboxed — Do Not Re-enable
 
-Bundle ID `soli.whisper.Whisper` with Apple Development signing → sandbox container at:
+`Whisper.entitlements` is intentionally empty. Removed 2026-07-26.
+
+**Why: the App Sandbox blocks synthetic keyboard events into other applications.**
+Auto-paste works by posting Cmd+V with `CGEvent.post(tap: .cghidEventTap)` in
+`simulatePaste()`. A sandboxed app cannot do this to another process, regardless of
+Accessibility permission, and no entitlement grants the capability to third-party apps.
+
+This failure is silent and very easy to misdiagnose:
+- `AXIsProcessTrusted()` returns **true**, so the "grant Accessibility" warning never fires
+- `CGEvent.post` returns nothing, so there is no error to observe
+- The text still reaches the clipboard, so manual Cmd+V works fine
+
+Symptom is "Accessibility is granted but it just doesn't paste." Do not chase TCC,
+code signatures, or permission resets — check the entitlements first.
+
+The sandbox costs nothing to drop here: per `fork-context.md` this is a personal
+single-machine fork, never App Store, never distributed.
+
+The other entitlements removed alongside it (`device.audio-input`,
+`files.user-selected.read-write`, `network.client`,
+`temporary-exception.apple-events`) were all sandbox-scoped and inert without it.
+Microphone access outside the sandbox comes from
+`INFOPLIST_KEY_NSMicrophoneUsageDescription` in build settings, which is still set.
+
+## Storage Location Followed the Sandbox
+
+Un-sandboxing changes what `FileManager.urls(for: .applicationSupportDirectory)`
+returns, so models and transcripts moved:
+
 ```
-~/Library/Containers/soli.whisper.Whisper/Data/Library/Application Support/Models/
+was:  ~/Library/Containers/soli.whisper.Whisper/Data/Library/Application Support/
+now:  ~/Library/Application Support/
 ```
 
-Both Xcode Debug runs and `/Applications/Whisper.app` use this same container. The model downloads once and is shared.
+Existing data was copied across at migration time, so nothing re-downloaded. The old
+container is left in place as a backup and can be deleted once the new location is
+proven. If a 626MB re-download ever starts unexpectedly, the sandbox state has
+probably changed — check the entitlements before assuming the model cache is corrupt.
 
 ## Do Not Build with CODE_SIGNING_REQUIRED=NO
 
@@ -52,4 +84,6 @@ Command-line builds with signing disabled bypass the sandbox. This was used duri
 
 ## Changing Bundle ID Has Consequences
 
-If `soli.whisper.Whisper` is changed, a new sandbox container is created and the model re-downloads. System permissions (microphone, accessibility) also need to be re-granted.
+If `soli.whisper.Whisper` is changed, system permissions (microphone, accessibility)
+need to be re-granted. This no longer creates a new sandbox container, since the app
+is not sandboxed, but TCC grants are keyed on bundle ID and will reset.
