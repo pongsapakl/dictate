@@ -4,9 +4,24 @@
 
 ### Real-Time Transcription vs Accuracy
 
-- Current approach requires waiting several seconds after speaking before transcription completes
-- Unable to achieve real-time streaming transcription while maintaining accuracy
-- This wait time is a significant UX issue - feels like wasted time
+Post-release wait is now ~1-2s (was "several seconds"), measured on the external-mic
+clamshell setup after the streaming fixes. It breaks down as:
+
+- ~400ms deliberate wait keeping the mic open past hotkey release
+- ~0.3-1s for `transcribeTail()`, one real decode pass over the unconfirmed tail
+- remainder: window restore and paste
+
+The 400ms is the tunable knob. The tail decode is the floor — removing it
+reintroduces the cut-off described in `docs/transcription-issues.md` Issue 4.
+Whisper pads every window to 30s, so a short tail costs nearly as much as a long one.
+
+### Accuracy on Hard Words — Open
+
+Rare proper nouns, product names, and technical jargon transcribe poorly. Turbo's
+distillation degrades exactly this class of token, so this interacts with the
+"Unify on Single Model" question below. Options not yet tried, cheapest first:
+post-transcription replacement map, `DecodingOptions.promptTokens` vocabulary
+biasing, full large-v3 for English, LLM post-correction.
 
 ### Cursor Lock During Transcription
 
