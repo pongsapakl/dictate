@@ -63,6 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var suppressNextRelease = false
     private let tapThreshold: TimeInterval = 0.3
     private let doubleTapWindow: TimeInterval = 0.3
+    private let pasteDelay: TimeInterval = 0.25
     private let waitingForSpeechText = "Waiting for speech..."
     private var recordingSessionId: Int = 0
     private var selectedLanguage: String? {
@@ -688,25 +689,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pb.declareTypes([.string], owner: nil)
         pb.setString(text, forType: .string)
 
-        if !AXIsProcessTrusted() {
+        let trusted = AXIsProcessTrusted()
+        NSLog("[dictate-paste] trusted=%@ savedPid=%d savedTitle=%@ front=%@ chars=%d",
+              trusted ? "YES" : "NO", savedAppPid, savedWindowTitle,
+              NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "nil", text.count)
+
+        if !trusted {
             AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary)
             showNotification(title: "Whisper", message: "Grant Accessibility permission, then try again. Text is in clipboard.")
             return
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + pasteDelay) { [weak self] in
             self?.simulatePaste()
         }
     }
 
     private func simulatePaste() {
-        let src = CGEventSource(stateID: .hidSystemState)
+        NSLog("[dictate-paste] posting front=%@ hwFlags=%llu",
+              NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "nil",
+              CGEventSource.flagsState(.combinedSessionState).rawValue)
+
+        let src = CGEventSource(stateID: .privateState)
         let vDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
         let vUp = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
         vDown?.flags = .maskCommand
         vUp?.flags = .maskCommand
         vDown?.post(tap: .cghidEventTap)
         vUp?.post(tap: .cghidEventTap)
+        NSLog("[dictate-paste] posted vDown=%@ vUp=%@", vDown == nil ? "nil" : "ok", vUp == nil ? "nil" : "ok")
 
         if autoSend {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
