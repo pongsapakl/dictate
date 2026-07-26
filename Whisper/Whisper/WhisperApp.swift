@@ -12,7 +12,6 @@ func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePoin
 let minRecordSeconds = 0.3
 
 let supportedLanguages: [(code: String?, name: String)] = [
-    (nil, "Auto-detect"),
     ("en", "English"),
     ("de", "German"),
     ("es", "Spanish"),
@@ -25,16 +24,10 @@ let supportedLanguages: [(code: String?, name: String)] = [
     ("zh", "Chinese"),
     ("ja", "Japanese"),
     ("ko", "Korean"),
-    ("ar", "Arabic"),
-    ("th", "Thai")
+    ("ar", "Arabic")
 ]
 
-let defaultModelVariant = "openai_whisper-large-v3-v20240930_turbo_632MB"
-let thaiModelVariant = "openai_whisper-large-v3-v20240930_626MB"
-
-func modelVariant(for language: String?) -> String {
-    language == "th" ? thaiModelVariant : defaultModelVariant
-}
+let modelVariant = "openai_whisper-large-v3-v20240930_626MB"
 
 @main
 struct WhisperApp: App {
@@ -64,19 +57,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var iconAnimationFrame: Int = 0
     private var lastLiveText: String = ""
     private var tailText: String = ""
+    private var isLatched = false
+    private var hotkeyPressTime: Date?
+    private var pendingStop: Task<Void, Never>?
+    private var suppressNextRelease = false
+    private let tapThreshold: TimeInterval = 0.3
+    private let doubleTapWindow: TimeInterval = 0.3
     private let waitingForSpeechText = "Waiting for speech..."
     private var recordingSessionId: Int = 0
-    private var loadedModelVariant: String?
     private var selectedLanguage: String? {
-        get { UserDefaults.standard.string(forKey: "selectedLanguage") }
+        get { UserDefaults.standard.string(forKey: "selectedLanguage") ?? "en" }
         set {
-            if let value = newValue {
-                UserDefaults.standard.set(value, forKey: "selectedLanguage")
-            } else {
-                UserDefaults.standard.removeObject(forKey: "selectedLanguage")
-            }
+            UserDefaults.standard.set(newValue ?? "en", forKey: "selectedLanguage")
             updateLanguageMenu()
-            reloadModelIfNeeded()
         }
     }
     private var languageMenu: NSMenu?
@@ -348,17 +341,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func reloadModelIfNeeded() {
-        let desired = modelVariant(for: selectedLanguage)
-        guard desired != loadedModelVariant else { return }
-        if isRecording { stopRecording() }
-        whisperKit = nil
-        streamTranscriber = nil
-        launcherPanel?.showLoading()
-        updateIcon(.loading)
-        Task { await loadWhisperModel() }
-    }
-
     private func terminateOtherInstances() {
         let myPID = ProcessInfo.processInfo.processIdentifier
         let bundleID = Bundle.main.bundleIdentifier ?? ""
@@ -437,15 +419,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if hotkeyPressed && !hotkeyDown {
             hotkeyDown = true
             keyPressedDuringHotkey = false
+            hotkeyPressTime = Date()
+
+            if isLatched {
+                suppressNextRelease = true
+                stopRecording()
+                return
+            }
+
+            if let pending = pendingStop {
+                pending.cancel()
+                pendingStop = nil
+                isLatched = true
+                suppressNextRelease = true
+                return
+            }
+
             if !isRecording { startRecording() }
         } else if !hotkeyPressed && hotkeyDown {
             hotkeyDown = false
-            if keyPressedDuringHotkey {
-                if isRecording { stopRecording(cancel: true) }
-            } else {
-                if isRecording { stopRecording() }
+            let heldFor = hotkeyPressTime.map { Date().timeIntervalSince($0) } ?? 0
+            hotkeyPressTime = nil
+
+            if suppressNextRelease {
+                suppressNextRelease = false
+                keyPressedDuringHotkey = false
+                return
             }
-            keyPressedDuringHotkey = false
+
+            if keyPressedDuringHotkey {
+                keyPressedDuringHotkey = false
+                if isRecording { stopRecording(cancel: true) }
+                return
+            }
+
+            if isLatched { return }
+
+            if heldFor < tapThreshold {
+                let window = doubleTapWindow
+                pendingStop = Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: UInt64(window * 1_000_000_000))
+                    guard !Task.isCancelled, let self else { return }
+                    self.pendingStop = nil
+                    if self.isRecording { self.stopRecording() }
+                }
+                return
+            }
+
+            if isRecording { stopRecording() }
         }
     }
 
@@ -457,9 +478,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
             launcherPanel?.updateLoadingProgress(0)
 
-            let variant = modelVariant(for: selectedLanguage)
             let modelPath = try await WhisperKit.download(
-                variant: variant,
+                variant: modelVariant,
                 downloadBase: modelFolder,
                 useBackgroundSession: false
             ) { progress in
@@ -470,7 +490,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
             launcherPanel?.updateLoadingProgress(1.0)
             whisperKit = try await WhisperKit(modelFolder: modelPath.path, audioProcessor: SelectableInputAudioProcessor())
-            loadedModelVariant = variant
             NSSound(named: .init("Tink"))?.play()
             updateIcon(.ready)
             launcherPanel?.hideLoading()
@@ -574,6 +593,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func stopRecording(cancel: Bool = false) {
         guard isRecording else { return }
         isRecording = false
+        isLatched = false
+        pendingStop?.cancel()
+        pendingStop = nil
         statusItem.menu?.item(at: 0)?.title = "Start Recording"
 
         let transcriber = streamTranscriber

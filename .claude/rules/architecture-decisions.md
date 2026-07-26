@@ -14,12 +14,25 @@ Do not re-introduce `mergeTranscriptions`, `chunkTimer`, `AudioRecorder`, or `tr
 
 ## Model Variant — Use Exact Name
 
-Default model: `openai_whisper-large-v3-v20240930_turbo_632MB`
-Thai model: `openai_whisper-large-v3-v20240930_626MB` (full large-v3, not turbo — turbo's distillation disproportionately degrades Thai per OpenAI)
+Single model, all languages: `openai_whisper-large-v3-v20240930_626MB` (full large-v3).
 
-`modelVariant(for:)` in `WhisperApp.swift` picks the variant by `selectedLanguage`. Changing language reloads the model via `reloadModelIfNeeded()`. The full large-v3 is slower per decode but more accurate on Thai; turbo stays the default for English and everything else.
+Decided 2026-07-26, resolving the "Unify on Single Model" investigation. The trigger was
+poor accuracy on rare proper nouns and technical jargon — exactly the class of token
+turbo's distillation degrades most. Thai was dropped at the same time (rarely used and
+never good enough), which removed the only reason for a second variant.
 
-Original app used `large-v3`. This fork uses the turbo variant — 8x faster, similar accuracy, fits in 8GB RAM.
+Consequences, deliberate:
+- `modelVariant` is a plain constant. `modelVariant(for:)` and `reloadModelIfNeeded()`
+  are gone — with one model there is nothing to swap, so changing language no longer
+  reloads anything.
+- Decode is slower. Full large-v3 has 32 decoder layers vs turbo's 4. Expect the
+  post-release wait to grow; if it becomes intolerable the fallback is turbo plus
+  `DecodingOptions.promptTokens` biasing rather than reinstating the two-model split.
+- "Auto-detect" was removed from the language list and the default is now `en`.
+  Auto-detect costs a decode pass and can misfire, and neither helps English accuracy.
+
+Original app used `large-v3`. This fork briefly used turbo (8x faster) and has now
+returned to full large-v3 for accuracy.
 
 **The model name must be the exact folder name from `argmaxinc/whisperkit-coreml` on HuggingFace.** A wrong name causes `WhisperKit.download()` to silently fail, leaving `whisperKit = nil` — the app appears to load but never transcribes. This is extremely hard to debug.
 
