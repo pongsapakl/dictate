@@ -47,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var isRecording = false
     private var flagsMonitor: Any?
     private var keyMonitor: Any?
+    private var mouseMonitor: Any?
     private var screenGlow: ScreenGlow?
     private var launcherPanel: LauncherPanel?
     private var statusMenu: NSMenu?
@@ -126,6 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         if let monitor = flagsMonitor { NSEvent.removeMonitor(monitor) }
         if let monitor = keyMonitor { NSEvent.removeMonitor(monitor) }
+        if let monitor = mouseMonitor { NSEvent.removeMonitor(monitor) }
     }
 
     private func requestPermissions() {
@@ -391,11 +393,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] _ in
             Task { @MainActor in
-                if self?.hotkeyDown == true {
-                    self?.keyPressedDuringHotkey = true
-                }
+                self?.handleChordInput()
             }
         }
+        mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]) { [weak self] _ in
+            Task { @MainActor in
+                self?.handleChordInput()
+            }
+        }
+    }
+
+    // The hotkey doubling as a chord modifier (option+arrow, option+click)
+    // must not dictate: cancel the moment any other input lands mid-hold.
+    private func handleChordInput() {
+        guard hotkeyDown, !isLatched else { return }
+        keyPressedDuringHotkey = true
+        if isRecording { stopRecording(cancel: true) }
     }
 
     private func handleFlagsChanged(_ event: NSEvent) {
