@@ -22,6 +22,13 @@ Two modules are selectable from the Engine menu (`speechModule` default):
   emitted stray "." finals and still missed listed words. Kept as the option for when
   custom vocabulary matters more than punctuation. Its live text refreshes faster.
 
+Re-checked 2026-10-13 by replaying 97 real dictations (31 min) from the corpus through
+both modules. DictationTranscriber produced 13% fewer words, and nearly all of the gap was
+content dropped rather than words changed. It ended 74 sentences against 252, and returned
+nothing at all for 4 clips. SpeechTranscriber stays the default; the question is closed
+unless Apple ships a new model. Neither output was checked against what was actually said,
+but the gap is large enough that doing so would not change the outcome.
+
 Hard words are handled after transcription instead: `Vocabulary.txt` (one term per line,
 also passed as contextual strings) auto-generates case-insensitive rewrites that tolerate a
 space between camel-case parts ("whisper kit" → "WhisperKit"), and `Replacements.txt`
