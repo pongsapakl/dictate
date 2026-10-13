@@ -22,6 +22,7 @@ final class TranscriptionStore {
     func save(_ text: String, timestamp: Date = Date()) -> URL? {
         try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
         let timestampStr = formatter.string(from: timestamp)
         let path = directory.appendingPathComponent("\(timestampStr).txt")

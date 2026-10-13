@@ -30,6 +30,9 @@ locally; see `.claude/local-notes/`.
 
 ### The ANE cache is a separate concern — do not blame signing
 
+*Historical since 2026-09-06: the app no longer ships a CoreML model, so there is no ANE
+cache to rebuild. Kept for the WhisperKit era.*
+
 A slow model load ("loading" for minutes, system-wide lag, `ANECompilerService` pinned) is
 the CoreML Neural Engine cache recompiling, and its known invalidation triggers are: manual
 cache wipes, **macOS build changes** (the cache is keyed by OS build), **disk-pressure

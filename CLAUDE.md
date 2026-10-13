@@ -2,26 +2,22 @@
 
 ## Open Challenges
 
-### Real-Time Transcription vs Accuracy
+### Engine swapped to Apple SpeechAnalyzer — 2026-09-06
 
-Post-release wait is now ~1-2s (was "several seconds") after the streaming fixes,
-measured on Apple silicon with the full large-v3 model. It breaks down as:
+WhisperKit and the 626MB large-v3 model are gone. See
+`.claude/rules/architecture-decisions.md` for the decision, the measured numbers, the
+SpeechTranscriber-vs-DictationTranscriber trade-off, and the untested Parakeet fallback.
+The old sections on post-release latency, tail decode and model unification are
+superseded. Still open after the swap:
 
-- ~400ms deliberate wait keeping the mic open past hotkey release
-- ~0.3-1s for `transcribeTail()`, one real decode pass over the unconfirmed tail
-- remainder: window restore and paste
-
-The 400ms is the tunable knob. The tail decode is the floor — removing it
-reintroduces the cut-off described in `docs/transcription-issues.md` Issue 4.
-Whisper pads every window to 30s, so a short tail costs nearly as much as a long one.
-
-### Accuracy on Hard Words — Open
-
-Rare proper nouns, product names, and technical jargon transcribe poorly. Turbo's
-distillation degrades exactly this class of token, so this interacts with the
-"Unify on Single Model" question below. Options not yet tried, cheapest first:
-post-transcription replacement map, `DecodingOptions.promptTokens` vocabulary
-biasing, full large-v3 for English, LLM post-correction.
+- **Hard words.** `Vocabulary.txt` / `Replacements.txt` in Application Support drive
+  post-transcription rewrites. DictationTranscriber's custom language model hook is the
+  next lever if that is not enough.
+- **Is it fast enough in daily use?** Measured 100-300ms release-to-final on the spike;
+  the app now records `releaseToFinalMs` per dictation into the corpus JSON, so the
+  answer comes from real data.
+- **Corpus.** Every dictation can be saved as WAV + JSON (`corpusDirectory` default).
+  Purpose: replay real speech against other engines later with `tools/speechbench/`.
 
 ### Cursor Lock During Transcription
 
@@ -37,16 +33,6 @@ biasing, full large-v3 for English, LLM post-correction.
 - CGWindowListCopyWindowInfo - returns helper windows (toolbars), not main windows
 - AXFocusedWindow - works for cross-app, but iTerm returns same ID for all windows
 - AppleScript for iTerm - "Not authorized to send Apple events"
-
-### Unify on Single Model — Decided 2026-07-26
-
-Standardized on full large-v3 626MB for everything; Thai support dropped. See
-`.claude/rules/architecture-decisions.md` for the reasoning and consequences.
-
-Still to measure in real use: whether the added decode latency is bearable. The
-open question is "does it feel slow", not "is it slow in ms". If it is not
-bearable, the fallback is turbo plus `DecodingOptions.promptTokens` vocabulary
-biasing — not reinstating the two-model split.
 
 ### Hands-Free Latch
 

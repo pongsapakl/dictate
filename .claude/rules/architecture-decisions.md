@@ -2,6 +2,55 @@
 
 These are deliberate decisions that diverge from upstream. Do not revert without strong reason.
 
+## Speech Engine — Apple SpeechAnalyzer, Decided 2026-09-06
+
+WhisperKit is gone. Transcription uses the `Speech` framework's `SpeechAnalyzer`
+(macOS 26+), so the deployment target is 26.0 and there is no model download, no
+CoreML bundle, and no package dependency. `SpeechEngine.swift` holds the mic capture,
+module selection, text post-processing and corpus recording.
+
+**Why:** the post-release wait was 1-2s, almost all of it one Whisper decode over a
+30s-padded window. Measured on Apple silicon with the spike in `tools/speechbench/`:
+SpeechAnalyzer finalises 100-300ms after the last audio, with equal or better English
+accuracy on ordinary words and built-in punctuation and casing.
+
+Two modules are selectable from the Engine menu (`speechModule` default):
+- `SpeechTranscriber` (default). Best punctuation and casing. **Ignores
+  `AnalysisContext.contextualStrings`**, verified by identical output with and without.
+- `DictationTranscriber`. Honours `contextualStrings` and has a custom language model
+  hook (`ContentHint.customizedLanguage`). In real-speech tests it ran sentences together,
+  emitted stray "." finals and still missed listed words. Kept as the option for when
+  custom vocabulary matters more than punctuation. Its live text refreshes faster.
+
+Hard words are handled after transcription instead: `Vocabulary.txt` (one term per line,
+also passed as contextual strings) auto-generates case-insensitive rewrites that tolerate a
+space between camel-case parts ("whisper kit" → "WhisperKit"), and `Replacements.txt`
+holds explicit `wrong => Right` rules. Both live in Application Support. Leading fillers
+("uh", "um") are stripped.
+
+**Not tested for real, recorded so they are not re-researched:** NVIDIA Parakeet TDT
+0.6B v3 via the FluidAudio Swift package (Apache 2.0, CoreML, macOS 14+). Published
+numbers: ~2.6% WER LibriSpeech, ~6x faster than Whisper turbo, ~800MB peak RAM, English
+plus 25 European languages, no custom vocabulary. It is the fallback if Apple's engine
+stalls or its accuracy regresses. Wispr Flow was looked at and is cloud-only; nothing to
+borrow on-device.
+
+Consequences:
+- Languages are limited to what `SpeechTranscriber` supports; the menu lists ten.
+  Changing language or engine re-runs `prepareSpeechAssets()`, which downloads the
+  locale's asset if needed and warms the model.
+- `releaseGrace` (150ms) keeps the mic open past hotkey release. It replaces the old
+  400ms wait; the tail-decode floor is gone because the analyzer sees every buffer.
+- Every non-empty dictation is optionally saved as WAV + JSON to the directory in the
+  `corpusDirectory` default (unset = off). The app checks the directory exists before
+  writing so an unmounted external volume is skipped, not silently recreated. Replay any
+  saved WAV against either module with `tools/speechbench/`.
+
+## Superseded by the engine swap (kept for history)
+
+Everything below this line described the WhisperKit implementation and no longer applies
+to the code. It is retained so the reasoning is not rediscovered if Whisper ever returns.
+
 ## AudioStreamTranscriber — Do Not Revert to Chunk+Merge
 
 The original app used a custom `AudioRecorder` + 5-second chunk timer + `mergeTranscriptions()`. This was replaced with WhisperKit's built-in `AudioStreamTranscriber`.

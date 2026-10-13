@@ -1,7 +1,8 @@
 import SwiftUI
 import AppKit
 import AVFoundation
-import WhisperKit
+import Speech
+import Combine
 import Quartz
 import UserNotifications
 import UniformTypeIdentifiers
@@ -9,25 +10,10 @@ import UniformTypeIdentifiers
 @_silgen_name("_AXUIElementGetWindow")
 func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>) -> AXError
 
-let minRecordSeconds = 0.3
-
-let supportedLanguages: [(code: String?, name: String)] = [
-    ("en", "English"),
-    ("de", "German"),
-    ("es", "Spanish"),
-    ("fr", "French"),
-    ("it", "Italian"),
-    ("pt", "Portuguese"),
-    ("nl", "Dutch"),
-    ("pl", "Polish"),
-    ("ru", "Russian"),
-    ("zh", "Chinese"),
-    ("ja", "Japanese"),
-    ("ko", "Korean"),
-    ("ar", "Arabic")
+let supportedLanguages: [(code: String, name: String)] = [
+    ("en", "English"), ("de", "German"), ("es", "Spanish"), ("fr", "French"), ("it", "Italian"),
+    ("pt", "Portuguese"), ("zh", "Chinese"), ("ja", "Japanese"), ("ko", "Korean"), ("ar", "Arabic")
 ]
-
-let modelVariant = "openai_whisper-large-v3-v20240930_626MB"
 
 @main
 struct WhisperApp: App {
@@ -41,9 +27,15 @@ struct WhisperApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
-    private var whisperKit: WhisperKit?
-    private var streamTranscriber: AudioStreamTranscriber?
-    private var lastStreamState: AudioStreamTranscriber.State?
+    private var analyzerFormat: AVAudioFormat?
+    private var currentLocale = Locale(identifier: "en_US")
+    private var analyzer: SpeechAnalyzer?
+    private var audioInput: AsyncStream<AnalyzerInput>.Continuation?
+    private var resultsTask: Task<Void, Never>?
+    private var microphone: MicrophoneCapture?
+    private var confirmedText = ""
+    private var volatileText = ""
+    private var releasedAt = Date()
     private var isRecording = false
     private var flagsMonitor: Any?
     private var keyMonitor: Any?
@@ -57,7 +49,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var iconAnimationTimer: Timer?
     private var iconAnimationFrame: Int = 0
     private var lastLiveText: String = ""
-    private var tailText: String = ""
     private var isLatched = false
     private var hotkeyPressTime: Date?
     private var pendingStop: Task<Void, Never>?
@@ -65,13 +56,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let tapThreshold: TimeInterval = 0.3
     private let doubleTapWindow: TimeInterval = 0.3
     private let pasteDelay: TimeInterval = 0.25
-    private let waitingForSpeechText = "Waiting for speech..."
+    private let releaseGrace: TimeInterval = 0.15
     private var recordingSessionId: Int = 0
-    private var selectedLanguage: String? {
+    private var selectedLanguage: String {
         get { UserDefaults.standard.string(forKey: "selectedLanguage") ?? "en" }
         set {
-            UserDefaults.standard.set(newValue ?? "en", forKey: "selectedLanguage")
+            UserDefaults.standard.set(newValue, forKey: "selectedLanguage")
             updateLanguageMenu()
+            Task { await prepareSpeechAssets() }
+        }
+    }
+    private var engineMenu: NSMenu?
+    private var selectedModule: SpeechModuleKind {
+        get { SpeechModuleKind(rawValue: UserDefaults.standard.string(forKey: "speechModule") ?? "") ?? .transcriber }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: "speechModule")
+            engineMenu?.items.forEach { $0.state = ($0.representedObject as? String == newValue.rawValue) ? .on : .off }
+            Task { await prepareSpeechAssets() }
         }
     }
     private var languageMenu: NSMenu?
@@ -98,7 +99,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             autoSendMenuItem?.state = newValue ? .on : .off
         }
     }
-    private var fileTranscriptionName: String?
     private var selectedHotkey: String {
         get { UserDefaults.standard.string(forKey: "selectedHotkey") ?? "rightOption" }
         set {
@@ -116,12 +116,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setupHotkeyMonitor()
         screenGlow = ScreenGlow()
         launcherPanel = LauncherPanel { [weak self] in self?.startRecording() }
-        launcherPanel?.showLoading()
         NotificationCenter.default.addObserver(forName: .transcribeFile, object: nil, queue: .main) { [weak self] notification in
             guard let url = notification.object as? URL else { return }
             Task { await self?.transcribeFile(url: url) }
         }
-        Task { await loadWhisperModel() }
+        Task { await prepareSpeechAssets() }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -143,73 +142,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func decodeAudioFile(url: URL) async throws -> (samples: [Float], sampleRate: Double) {
-        let audioFile = try AVAudioFile(forReading: url)
-        let format = audioFile.processingFormat
-        let frameCount = AVAudioFrameCount(audioFile.length)
-
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
-            throw NSError(domain: "Whisper", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to create audio buffer"])
-        }
-
-        try audioFile.read(into: buffer)
-
-        guard let floatData = buffer.floatChannelData else {
-            throw NSError(domain: "Whisper", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to read audio data"])
-        }
-
-        let channelCount = Int(format.channelCount)
-        let frameLength = Int(buffer.frameLength)
-
-        var samples: [Float]
-        if channelCount == 1 {
-            samples = Array(UnsafeBufferPointer(start: floatData[0], count: frameLength))
-        } else {
-            samples = [Float](repeating: 0, count: frameLength)
-            for i in 0..<frameLength {
-                var sum: Float = 0
-                for ch in 0..<channelCount {
-                    sum += floatData[ch][i]
-                }
-                samples[i] = sum / Float(channelCount)
-            }
-        }
-
-        return (samples, format.sampleRate)
-    }
-
     private func transcribeFile(url: URL) async {
-        guard whisperKit != nil else {
+        guard let format = analyzerFormat else {
             showNotification(title: "Whisper", message: "Model not loaded yet. Please wait.")
             return
         }
-
-        fileTranscriptionName = url.lastPathComponent
         screenGlow?.show(mode: .transcribing)
-        launcherPanel?.showFileTranscribing(fileName: fileTranscriptionName!)
+        launcherPanel?.showFileTranscribing(fileName: url.lastPathComponent)
         updateIcon(.transcribing)
 
-        do {
-            let (samples, sampleRate) = try await decodeAudioFile(url: url)
-            let resampled = AudioResampler.resampleTo16kHz(samples: samples, fromRate: sampleRate)
-            let options = DecodingOptions(language: selectedLanguage)
-            let results = try await whisperKit!.transcribe(audioArray: resampled, decodeOptions: options)
-            let text = results.map { $0.text }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+        let input = startAnalysis()
+        if let buffer = try? readAudioFile(url, as: format) { input.yield(AnalyzerInput(buffer: buffer)) }
+        let text = TextPolish.apply(await finishAnalysis(analyzer, input, resultsTask))
 
-            if text.isEmpty {
-                showNotification(title: "Whisper", message: "No speech detected in file.")
-            } else {
-                saveTranscript(text)
-                copyToClipboard(text)
-                launcherPanel?.showFileResult(text: text, fileName: fileTranscriptionName!)
-                showNotification(title: "Whisper", message: "Transcription copied to clipboard!")
-            }
-        } catch {
-            showNotification(title: "Whisper", message: "Failed to transcribe file: \(error.localizedDescription)")
+        if text.isEmpty {
+            showNotification(title: "Whisper", message: "No speech detected in file.")
             launcherPanel?.resetToIdle()
+        } else {
+            saveTranscript(text)
+            copyToClipboard(text)
+            launcherPanel?.showFileResult(text: text, fileName: url.lastPathComponent)
+            showNotification(title: "Whisper", message: "Transcription copied to clipboard!")
         }
-
-        fileTranscriptionName = nil
         screenGlow?.hide()
         updateIcon(.ready)
     }
@@ -246,6 +200,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         micItem.submenu = micMenu
         statusMenu?.addItem(micItem)
         updateMicMenu()
+
+        let engineItem = NSMenuItem(title: "Engine", action: nil, keyEquivalent: "")
+        engineMenu = NSMenu()
+        for kind in SpeechModuleKind.allCases {
+            let item = NSMenuItem(title: kind.title, action: #selector(selectEngine(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = kind.rawValue
+            item.state = kind == selectedModule ? .on : .off
+            engineMenu?.addItem(item)
+        }
+        engineMenu?.addItem(.separator())
+        let wordsItem = NSMenuItem(title: "Custom Words…", action: #selector(openVocabulary), keyEquivalent: "")
+        wordsItem.target = self
+        engineMenu?.addItem(wordsItem)
+        engineItem.submenu = engineMenu
+        statusMenu?.addItem(engineItem)
 
         let recentItem = NSMenuItem(title: "Recent Transcriptions", action: nil, keyEquivalent: "")
         recentMenu = NSMenu()
@@ -294,7 +264,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func selectLanguage(_ sender: NSMenuItem) {
-        selectedLanguage = sender.representedObject as? String
+        selectedLanguage = sender.representedObject as? String ?? "en"
+    }
+
+    @objc private func selectEngine(_ sender: NSMenuItem) {
+        selectedModule = SpeechModuleKind(rawValue: sender.representedObject as? String ?? "") ?? .transcriber
+    }
+
+    @objc private func openVocabulary() {
+        let url = UserFiles.url("Vocabulary.txt")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try? "# One word or phrase per line. Passed as hints to Apple Dictation and auto-corrected in every result (WhisperKit fixes \"whisper kit\").\n# Explicit rewrites go in Replacements.txt next to this file, one per line:  wrong phrase => Right Phrase\n".write(to: url, atomically: true, encoding: .utf8)
+        }
+        NSWorkspace.shared.open(url)
     }
 
     @objc private func selectMicrophone(_ sender: NSMenuItem) {
@@ -309,7 +291,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         defaultItem.state = selectedMicrophone == nil ? .on : .off
         micMenu.addItem(defaultItem)
         micMenu.addItem(.separator())
-        for device in SelectableInputAudioProcessor.inputDevices() {
+        for device in InputDevices.all() {
             let item = NSMenuItem(title: device.name, action: #selector(selectMicrophone(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = device.name
@@ -484,33 +466,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func loadWhisperModel() async {
-        do {
-            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            let modelFolder = appSupport.appendingPathComponent("Models", isDirectory: true)
-            try? FileManager.default.createDirectory(at: modelFolder, withIntermediateDirectories: true)
-
-            launcherPanel?.updateLoadingProgress(0)
-
-            let modelPath = try await WhisperKit.download(
-                variant: modelVariant,
-                downloadBase: modelFolder,
-                useBackgroundSession: false
-            ) { progress in
-                Task { @MainActor [weak self] in
-                    self?.launcherPanel?.updateLoadingProgress(progress.fractionCompleted)
-                }
+    private func prepareSpeechAssets() async {
+        analyzerFormat = nil
+        updateIcon(.loading)
+        launcherPanel?.showLoading()
+        launcherPanel?.updateLoadingProgress(0)
+        currentLocale = await selectedModule.supportedLocale(for: selectedLanguage) ?? Locale(identifier: "en_US")
+        let module = selectedModule.makeModule(locale: currentLocale)
+        _ = try? await AssetInventory.reserve(locale: currentLocale)
+        if let request = try? await AssetInventory.assetInstallationRequest(supporting: [module]) {
+            let observer = Task { [weak self] in
+                for await fraction in request.progress.publisher(for: \.fractionCompleted).values { self?.launcherPanel?.updateLoadingProgress(fraction) }
             }
-
-            launcherPanel?.updateLoadingProgress(1.0)
-            whisperKit = try await WhisperKit(modelFolder: modelPath.path, audioProcessor: SelectableInputAudioProcessor())
-            NSSound(named: .init("Tink"))?.play()
-            updateIcon(.ready)
-            launcherPanel?.hideLoading()
-        } catch {
-            showNotification(title: "Whisper", message: "Failed to load model: \(error.localizedDescription)")
-            launcherPanel?.hideLoading()
+            try? await request.downloadAndInstall()
+            observer.cancel()
         }
+        let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [module])
+        let warmup = SpeechAnalyzer(modules: [module], options: .init(priority: .userInitiated, modelRetention: .processLifetime))
+        try? await warmup.prepareToAnalyze(in: format)
+        analyzerFormat = format
+        launcherPanel?.updateLoadingProgress(1)
+        launcherPanel?.hideLoading()
+        updateIcon(.ready)
+        NSSound(named: .init("Tink"))?.play()
     }
 
     @objc private func toggleRecording() {
@@ -518,55 +496,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func startRecording() {
-        guard let wk = whisperKit, let tokenizer = wk.tokenizer else {
+        guard let format = analyzerFormat else {
             showNotification(title: "Whisper", message: "Model not loaded yet. Please wait.")
             return
         }
         logFocusInfo()
         isRecording = true
-        lastStreamState = nil
-        lastLiveText = ""
-        tailText = ""
         recordingSessionId += 1
         updateIcon(.recording)
         statusItem.menu?.item(at: 0)?.title = "Stop Recording"
         screenGlow?.show(mode: .recording)
         launcherPanel?.showRecording()
 
-        let transcriber = AudioStreamTranscriber(
-            audioEncoder: wk.audioEncoder,
-            featureExtractor: wk.featureExtractor,
-            segmentSeeker: wk.segmentSeeker,
-            textDecoder: wk.textDecoder,
-            tokenizer: tokenizer,
-            audioProcessor: wk.audioProcessor,
-            decodingOptions: DecodingOptions(language: selectedLanguage),
-            requiredSegmentsForConfirmation: 1,
-            silenceThreshold: 0.15,
-            stateChangeCallback: { [weak self] _, newState in
-                Task { @MainActor [weak self] in
-                    self?.handleStreamState(newState)
-                }
-            }
-        )
-        streamTranscriber = transcriber
-        Task {
-            do { try await transcriber.startStreamTranscription() } catch {
-                await MainActor.run { [weak self] in
-                    self?.showNotification(title: "Whisper", message: "Recording failed: \(error.localizedDescription)")
-                    self?.stopRecording(cancel: true)
-                }
-            }
+        let input = startAnalysis()
+        let capture = MicrophoneCapture()
+        microphone = capture
+        if (try? capture.start(deviceID: InputDevices.id(named: selectedMicrophone), format: format, onBuffer: { input.yield(AnalyzerInput(buffer: $0)) })) == nil {
+            showNotification(title: "Whisper", message: "Microphone failed to start.")
+            stopRecording(cancel: true)
         }
     }
 
-    private func handleStreamState(_ state: AudioStreamTranscriber.State) {
-        lastStreamState = state
+    private func startAnalysis() -> AsyncStream<AnalyzerInput>.Continuation {
+        let module = selectedModule.makeModule(locale: currentLocale)
+        let context = AnalysisContext()
+        let vocabulary = UserFiles.vocabulary
+        if !vocabulary.isEmpty { context.contextualStrings = [.general: vocabulary] }
+        confirmedText = ""
+        volatileText = ""
+        lastLiveText = ""
+        resultsTask = Task { [weak self] in
+            for await result in speechResults(of: module) { self?.handleResult(result) }
+        }
+        let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
+        analyzer = SpeechAnalyzer(inputSequence: stream, modules: [module], options: .init(priority: .userInitiated, modelRetention: .processLifetime), analysisContext: context)
+        audioInput = continuation
+        return continuation
+    }
+
+    private func finishAnalysis(_ session: SpeechAnalyzer?, _ input: AsyncStream<AnalyzerInput>.Continuation?, _ results: Task<Void, Never>?) async -> String {
+        input?.finish()
+        try? await session?.finalizeAndFinishThroughEndOfInput()
+        await results?.value
+        return (confirmedText + volatileText).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func handleResult(_ result: SpeechResult) {
+        if result.isFinal {
+            confirmedText += result.text
+            volatileText = ""
+        } else {
+            volatileText = result.text
+        }
         guard isRecording else { return }
-        let confirmedText = state.confirmedSegments.map { $0.text }.joined()
-        let decodingText = state.currentText == waitingForSpeechText ? "" : state.currentText
-        let liveTail = decodingText.isEmpty ? state.unconfirmedSegments.map { $0.text }.joined() : decodingText
-        let liveText = stripTokens(confirmedText + liveTail)
+        let liveText = (confirmedText + volatileText).trimmingCharacters(in: .whitespaces)
         guard !liveText.isEmpty, liveText != lastLiveText else { return }
         lastLiveText = liveText
         launcherPanel?.updateLiveText(liveText)
@@ -610,14 +593,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         isLatched = false
         pendingStop?.cancel()
         pendingStop = nil
+        releasedAt = Date()
         statusItem.menu?.item(at: 0)?.title = "Start Recording"
 
-        let transcriber = streamTranscriber
-        streamTranscriber = nil
+        let capture = microphone
+        let session = analyzer
+        let input = audioInput
+        let results = resultsTask
+        microphone = nil
+        analyzer = nil
+        audioInput = nil
+        resultsTask = nil
 
         if cancel {
-            Task { await transcriber?.stopStreamTranscription() }
-            lastStreamState = nil
+            capture?.stop()
+            input?.finish()
+            results?.cancel()
+            Task { await session?.cancelAndFinishNow() }
             launcherPanel?.hideLiveText()
             screenGlow?.hide()
             launcherPanel?.resetToIdle()
@@ -630,40 +622,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let sessionId = recordingSessionId
         Task {
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            await transcriber?.stopStreamTranscription()
-            await transcribeTail()
-            await MainActor.run { [weak self] in
-                guard self?.recordingSessionId == sessionId else { return }
-                self?.finalizeSpeech()
-            }
+            try? await Task.sleep(nanoseconds: UInt64(releaseGrace * 1_000_000_000))
+            capture?.stop()
+            let rawText = await finishAnalysis(session, input, results)
+            guard recordingSessionId == sessionId else { return }
+            finalizeSpeech(rawText: rawText, frames: capture?.capturedFrames ?? [])
         }
     }
 
-    private func transcribeTail() async {
-        tailText = ""
-        guard let wk = whisperKit, let state = lastStreamState else { return }
-        let samples = Array(wk.audioProcessor.audioSamples)
-        let start = Int(state.lastConfirmedSegmentEndSeconds * Float(WhisperKit.sampleRate))
-        guard start < samples.count else { return }
-        var options = DecodingOptions(language: selectedLanguage)
-        options.windowClipTime = 0
-        let results = try? await wk.transcribe(audioArray: Array(samples[start...]), decodeOptions: options)
-        tailText = results?.map { $0.text }.joined() ?? ""
-    }
-
-    private func stripTokens(_ text: String) -> String {
-        text.replacingOccurrences(of: "<\\|[^|]+\\|>", with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func finalizeSpeech() {
-        let confirmedText = lastStreamState?.confirmedSegments.map { $0.text }.joined() ?? ""
-        let unconfirmedText = lastStreamState?.unconfirmedSegments.map { $0.text }.joined() ?? ""
-        let trailingText = stripTokens(tailText).isEmpty ? unconfirmedText : tailText
-        let finalText = stripTokens([confirmedText, trailingText].filter { !$0.isEmpty }.joined(separator: " "))
-        lastStreamState = nil
-
+    private func finalizeSpeech(rawText: String, frames: [Int16]) {
+        let releaseToFinalMs = Int(Date().timeIntervalSince(releasedAt) * 1000)
+        let finalText = TextPolish.apply(rawText)
         if finalText.isEmpty {
             showNotification(title: "Whisper", message: "No speech detected. Try again.")
             screenGlow?.hide()
@@ -672,7 +641,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        saveTranscript(finalText)
+        let timestamp = saveTranscript(finalText)
         restoreWindow()
         copyAndPaste(finalText)
         NSSound(named: .init("Pop"))?.play()
@@ -680,6 +649,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         screenGlow?.hide()
         launcherPanel?.resetToIdle()
         updateIcon(.ready)
+
+        let sampleRate = analyzerFormat?.sampleRate ?? 16000
+        Corpus.save(frames: frames, sampleRate: sampleRate, entry: CorpusEntry(
+            timestamp: timestamp,
+            module: selectedModule.rawValue,
+            locale: currentLocale.identifier,
+            durationSeconds: Double(frames.count) / sampleRate,
+            releaseToFinalMs: releaseToFinalMs,
+            rawText: rawText,
+            text: finalText,
+            targetApp: NSRunningApplication(processIdentifier: savedAppPid)?.bundleIdentifier ?? "",
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString))
     }
 
     private func restoreWindow() {
@@ -691,10 +672,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     }
 
-    private func saveTranscript(_ text: String) {
-        transcriptionStore.save(text)
+    @discardableResult
+    private func saveTranscript(_ text: String) -> String {
+        let url = transcriptionStore.save(text)
         recentTranscriptions.insert(TranscriptionRecord(timestamp: "", text: text), at: 0)
         updateRecentMenu()
+        return url?.deletingPathExtension().lastPathComponent ?? ""
     }
 
     private func copyAndPaste(_ text: String) {
