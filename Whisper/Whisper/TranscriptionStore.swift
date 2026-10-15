@@ -34,16 +34,12 @@ final class TranscriptionStore {
         }
     }
 
-    func loadAll() -> [TranscriptionRecord] {
-        guard fileManager.fileExists(atPath: directory.path) else { return [] }
-        guard let files = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey]) else { return [] }
+    func loadRecent(limit: Int) -> [TranscriptionRecord] {
+        guard let files = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return [] }
         return files
             .filter { $0.pathExtension == "txt" }
-            .sorted { a, b in
-                let dateA = (try? a.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date.distantPast
-                let dateB = (try? b.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date.distantPast
-                return dateA > dateB
-            }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+            .prefix(limit)
             .compactMap { file -> TranscriptionRecord? in
                 guard let text = try? String(contentsOf: file, encoding: .utf8) else { return nil }
                 return TranscriptionRecord(timestamp: file.deletingPathExtension().lastPathComponent, text: text)

@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreAudio
+import os
 import Speech
 
 enum SpeechModuleKind: String, CaseIterable {
@@ -31,21 +32,46 @@ struct SpeechResult {
 func speechResults(of module: any SpeechModule) -> AsyncStream<SpeechResult> {
     AsyncStream { continuation in
         let task = Task {
-            if let transcriber = module as? SpeechTranscriber {
-                var iterator = transcriber.results.makeAsyncIterator()
-                while let result = try? await iterator.next() {
-                    continuation.yield(SpeechResult(text: String(result.text.characters), isFinal: result.isFinal))
+            do {
+                if let transcriber = module as? SpeechTranscriber {
+                    for try await result in transcriber.results {
+                        continuation.yield(SpeechResult(text: String(result.text.characters), isFinal: result.isFinal))
+                    }
+                } else if let dictation = module as? DictationTranscriber {
+                    for try await result in dictation.results {
+                        continuation.yield(SpeechResult(text: String(result.text.characters), isFinal: result.isFinal))
+                    }
                 }
-            } else if let dictation = module as? DictationTranscriber {
-                var iterator = dictation.results.makeAsyncIterator()
-                while let result = try? await iterator.next() {
-                    continuation.yield(SpeechResult(text: String(result.text.characters), isFinal: result.isFinal))
-                }
+            } catch {
+                log.error("speech results failed: \(error.localizedDescription, privacy: .public)")
             }
             continuation.finish()
         }
         continuation.onTermination = { _ in task.cancel() }
     }
+}
+
+final class Transcript {
+    private var confirmed = ""
+    private var volatile = ""
+
+    var text: String { (confirmed + volatile).trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    func add(_ result: SpeechResult) {
+        if result.isFinal {
+            confirmed += result.text
+            volatile = ""
+        } else {
+            volatile = result.text
+        }
+    }
+}
+
+struct Dictation {
+    let analyzer: SpeechAnalyzer
+    let input: AsyncStream<AnalyzerInput>.Continuation
+    let results: Task<Void, Never>
+    let transcript: Transcript
 }
 
 struct InputDevice {
@@ -90,19 +116,33 @@ enum InputDevices {
     }
 }
 
+struct MicrophoneUnavailable: Error {}
+
 final class MicrophoneCapture: @unchecked Sendable {
     private let engine = AVAudioEngine()
     private let lock = NSLock()
     private var frames: [Int16] = []
+    private var configurationObserver: NSObjectProtocol?
 
     var capturedFrames: [Int16] { lock.withLock { frames } }
 
-    func start(deviceID: AudioDeviceID?, format: AVAudioFormat, onBuffer: @escaping @Sendable (AVAudioPCMBuffer) -> Void) throws {
+    func start(deviceID: AudioDeviceID?, format: AVAudioFormat, onFailure: @escaping @Sendable () -> Void, onBuffer: @escaping @Sendable (AVAudioPCMBuffer) -> Void) throws {
         if var deviceID, let unit = engine.inputNode.audioUnit {
             AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &deviceID, UInt32(MemoryLayout<AudioDeviceID>.size))
         }
+        try run(format: format, onBuffer: onBuffer)
+        configurationObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
+            log.notice("audio input changed mid-recording, restarting capture")
+            self?.engine.inputNode.removeTap(onBus: 0)
+            if (try? self?.run(format: format, onBuffer: onBuffer)) == nil { onFailure() }
+        }
+    }
+
+    private func run(format: AVAudioFormat, onBuffer: @escaping @Sendable (AVAudioPCMBuffer) -> Void) throws {
         let inputFormat = engine.inputNode.outputFormat(forBus: 0)
-        let converter = AVAudioConverter(from: inputFormat, to: format)!
+        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0, let converter = AVAudioConverter(from: inputFormat, to: format) else {
+            throw MicrophoneUnavailable()
+        }
         let ratio = format.sampleRate / inputFormat.sampleRate
         engine.inputNode.installTap(onBus: 0, bufferSize: 2400, format: inputFormat) { [weak self] buffer, _ in
             let converted = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 16)!
@@ -120,6 +160,8 @@ final class MicrophoneCapture: @unchecked Sendable {
     }
 
     func stop() {
+        configurationObserver.map(NotificationCenter.default.removeObserver)
+        configurationObserver = nil
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
     }
@@ -138,47 +180,7 @@ final class MicrophoneCapture: @unchecked Sendable {
     }
 }
 
-enum UserFiles {
-    static let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-
-    static var vocabulary: [String] { lines("Vocabulary.txt") }
-
-    static var replacements: [(pattern: String, replacement: String)] {
-        let explicit = lines("Replacements.txt").compactMap { line -> (String, String)? in
-            let parts = line.components(separatedBy: "=>").map { $0.trimmingCharacters(in: .whitespaces) }
-            return parts.count == 2 ? ("\\b\(NSRegularExpression.escapedPattern(for: parts[0]))\\b", parts[1]) : nil
-        }
-        let fromVocabulary = vocabulary.map { word -> (String, String) in
-            let parts = word.matches(of: /[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])/).map { NSRegularExpression.escapedPattern(for: String($0.output)) }
-            return ("\\b\(parts.joined(separator: "\\s?"))\\b", word)
-        }
-        return explicit + fromVocabulary
-    }
-
-    static func url(_ name: String) -> URL {
-        directory.appendingPathComponent(name)
-    }
-
-    private static func lines(_ name: String) -> [String] {
-        ((try? String(contentsOf: url(name), encoding: .utf8)) ?? "")
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
-    }
-}
-
-enum TextPolish {
-    static func apply(_ text: String) -> String {
-        var out = text.replacingOccurrences(of: "(?i)\\b(uh|um)\\b,?\\s*", with: "", options: .regularExpression)
-        for rule in UserFiles.replacements {
-            out = out.replacingOccurrences(of: "(?i)\(rule.pattern)", with: rule.replacement, options: .regularExpression)
-        }
-        out = out.replacingOccurrences(of: "\\s{2,}", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
-        return out.prefix(1).uppercased() + out.dropFirst()
-    }
-}
-
-struct CorpusEntry: Encodable {
+nonisolated struct CorpusEntry: Encodable, Sendable {
     let timestamp: String
     let module: String
     let locale: String
@@ -190,33 +192,36 @@ struct CorpusEntry: Encodable {
     let osVersion: String
 }
 
-enum Corpus {
+nonisolated enum Corpus {
     static var directory: URL? {
         UserDefaults.standard.string(forKey: "corpusDirectory").map { URL(fileURLWithPath: $0, isDirectory: true) }
     }
 
     static func save(frames: [Int16], sampleRate: Double, entry: CorpusEntry) {
-        guard let root = directory else { return }
+        guard let root = directory, !frames.isEmpty else { return }
         guard FileManager.default.fileExists(atPath: root.path) else {
-            NSLog("[dictate-corpus] directory not mounted, skipping: %@", root.path)
+            log.notice("corpus directory not mounted, skipping")
             return
         }
         let monthDirectory = root.appendingPathComponent(String(entry.timestamp.prefix(7)), isDirectory: true)
-        try? FileManager.default.createDirectory(at: monthDirectory, withIntermediateDirectories: true)
         let base = monthDirectory.appendingPathComponent(entry.timestamp)
         let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: sampleRate, channels: 1, interleaved: false)!
         let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames.count))!
         buffer.frameLength = AVAudioFrameCount(frames.count)
         frames.withUnsafeBufferPointer { buffer.int16ChannelData![0].update(from: $0.baseAddress!, count: frames.count) }
-        let file = try? AVAudioFile(forWriting: base.appendingPathExtension("wav"), settings: format.settings, commonFormat: .pcmFormatInt16, interleaved: false)
-        try? file?.write(from: buffer)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try? encoder.encode(entry).write(to: base.appendingPathExtension("json"))
+        do {
+            try FileManager.default.createDirectory(at: monthDirectory, withIntermediateDirectories: true)
+            try AVAudioFile(forWriting: base.appendingPathExtension("wav"), settings: format.settings, commonFormat: .pcmFormatInt16, interleaved: false).write(from: buffer)
+            try encoder.encode(entry).write(to: base.appendingPathExtension("json"))
+        } catch {
+            log.error("corpus write failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 }
 
-func readAudioFile(_ url: URL, as format: AVAudioFormat) throws -> AVAudioPCMBuffer {
+nonisolated func readAudioFile(_ url: URL, as format: AVAudioFormat) throws -> AVAudioPCMBuffer {
     let file = try AVAudioFile(forReading: url)
     let source = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length))!
     try file.read(into: source)
