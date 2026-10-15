@@ -66,8 +66,14 @@ The cause was not confirmed; these changes close the likely paths and make the n
   has no timeout of its own; on expiry the analyzer is cancelled and the partial text is
   pasted. Raised from nothing, not tuned: normal finalize is 100-300ms.
 - **Mic capture survives device changes.** On `AVAudioEngineConfigurationChange` the tap is
-  reinstalled on the new format; if the input is gone, the dictation finishes with what
-  was heard. A 0 Hz / 0-channel input throws instead of crashing.
+  reinstalled, but only if the engine stopped or the input format changed; if the input is
+  gone, the dictation finishes with what was heard. A 0 Hz / 0-channel input throws instead
+  of crashing. The change was seen ~50ms into every recording on the dev machine; the log
+  line records the before/after format to show whether a restart was needed.
+- **Open: release-to-final latency.** First build with the restart-every-time behaviour:
+  median 694ms over 8 dictations (4169, 650, 2010, 700, 775, 689, 429, 315) against a
+  345ms median over 207 before. Not yet known whether that was the restart or warm-up
+  after launch. Compare `releaseToFinalMs` in the corpus after a day of use.
 - **Logging and watchdog** (`Diagnostics.swift`). One `os.Logger` line per step; window
   titles and dictated text are never logged. A background timer pings the main thread and
   writes a `sample` to `~/Library/Logs/Whisper/` after 10s of silence. It uses uptime,

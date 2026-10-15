@@ -123,6 +123,7 @@ final class MicrophoneCapture: @unchecked Sendable {
     private let lock = NSLock()
     private var frames: [Int16] = []
     private var configurationObserver: NSObjectProtocol?
+    private var tapFormat: AVAudioFormat?
 
     var capturedFrames: [Int16] { lock.withLock { frames } }
 
@@ -132,9 +133,13 @@ final class MicrophoneCapture: @unchecked Sendable {
         }
         try run(format: format, onBuffer: onBuffer)
         configurationObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
-            log.notice("audio input changed mid-recording, restarting capture")
-            self?.engine.inputNode.removeTap(onBus: 0)
-            if (try? self?.run(format: format, onBuffer: onBuffer)) == nil { onFailure() }
+            guard let self else { return }
+            let current = engine.inputNode.outputFormat(forBus: 0)
+            let needsRestart = !engine.isRunning || current != tapFormat
+            log.notice("audio input changed: running=\(self.engine.isRunning, privacy: .public) format \(self.tapFormat?.sampleRate ?? 0, privacy: .public)Hz/\(self.tapFormat?.channelCount ?? 0, privacy: .public)ch -> \(current.sampleRate, privacy: .public)Hz/\(current.channelCount, privacy: .public)ch restart=\(needsRestart, privacy: .public)")
+            guard needsRestart else { return }
+            engine.inputNode.removeTap(onBus: 0)
+            if (try? run(format: format, onBuffer: onBuffer)) == nil { onFailure() }
         }
     }
 
@@ -143,6 +148,7 @@ final class MicrophoneCapture: @unchecked Sendable {
         guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0, let converter = AVAudioConverter(from: inputFormat, to: format) else {
             throw MicrophoneUnavailable()
         }
+        tapFormat = inputFormat
         let ratio = format.sampleRate / inputFormat.sampleRate
         engine.inputNode.installTap(onBus: 0, bufferSize: 2400, format: inputFormat) { [weak self] buffer, _ in
             let converted = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 16)!
