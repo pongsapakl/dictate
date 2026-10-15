@@ -44,16 +44,31 @@ coming. Long holds are unaffected.
 ## Structure
 
 ```
-.venv/                    # virtual environment
-requirements.txt          # dependencies
-dictate.py                # main app
+Whisper/Whisper/
+  WhisperApp.swift          # app delegate: menu, hotkey, dictation flow, paste
+  SpeechEngine.swift        # SpeechAnalyzer modules, mic capture, corpus recording
+  TextPolish.swift          # Vocabulary.txt / Replacements.txt rewrites, filler stripping
+  TranscriptionStore.swift  # transcript files in Application Support
+  Diagnostics.swift         # os.Logger + main-thread freeze watchdog
+  LauncherPanel.swift       # floating panel, live text, file drop
+  ScreenGlow.swift          # screen-edge glow while recording
+tools/speechbench/          # replay corpus audio against engines
+tools/selftest/             # swiftc self-test for TextPolish and the store
 ```
 
-## Run
+## Build and Test
 
-```bash
-source .venv/bin/activate && python dictate.py
-```
+- Xcode ⌘R runs the Debug build (`Whisper Dev.app`); the daily app is a separate Release build.
+- `zsh tools/selftest/run.sh` checks the text rules and the transcript store. The Xcode
+  project has no test target.
+
+## Diagnostics
+
+- Every dictation step logs to the unified log:
+  `log show --last 1h --predicate 'subsystem == "soli.whisper.Whisper"'`
+- If the main thread stops responding for 10s, the watchdog logs a fault and writes a
+  `sample` of the process to `~/Library/Logs/Whisper/hang-*.txt`.
+- Finishing a transcription is capped at 5s; on timeout the partial text is pasted.
 
 ## Deploy Reminder
 
@@ -68,58 +83,24 @@ After completing development work that the user wants to use daily, **remind the
 - Avoid getting stuck in loops trying to fix issues caused by other agents' in-progress work
 - When in doubt about an unexpected error, ask before attempting repairs
 
-### No Background Tasks
-
-- **Never run commands in the background** - always run commands in the foreground
-- **Wait for completion** - let each command finish before moving on
-
-### No Wildcard Imports
-
-- **Never use `from x import *`** - always import specific names explicitly
-
-❌ Bad:
-```python
-from typing import *
-```
-
-✅ Good:
-```python
-import typing
-```
-
 ### No Comments
 
 - **Never add comments to code** - no exceptions
-- **Never add docstrings** - no exceptions
 - Code should be self-explanatory through clear naming and structure
 
 ### No Single-Use Variables
 
-- If a variable is only read once, return or use the expression directly
-
-❌ Bad:
-```python
-def get_data():
-    result = calculate_something()
-    return result
-```
-
-✅ Good:
-```python
-def get_data():
-    return calculate_something()
-```
+- If a variable is only read once, use the expression directly
 
 ### Happy Path
 
-- **Focus on the happy path** - write if conditions for when you do actual work
+- **Focus on the happy path** - write `guard`/`if` conditions for when you do actual work
 - **Less code is better**
 
-### No Try-Except
+### Errors Are Never Silent
 
-- **Never add try-except blocks** unless the user explicitly requests error handling
-- **Let exceptions propagate naturally**
-- **Fail fast and loud**
+- Don't add error handling the task doesn't need, and don't hide failures with `try?`
+- Where an error can't propagate (UI callbacks, background work), log it with `log.error`
 
 ### No Single-Use Functions
 
@@ -127,23 +108,12 @@ def get_data():
 
 ### Use Default Parameters
 
-- Use default parameter values instead of checking if a parameter is None
+- Use default parameter values instead of checking for `nil`
 
-### Prefer Ternary
+### Prefer Ternary and `map`/`filter`
 
-- **Use ternary operator for simple conditional assignments**
-
-### No Shebang
-
-- **Never add shebang lines** - don't include `#!/usr/bin/env python3`
-
-### Prefer Comprehensions
-
-- **Use list/dict comprehensions instead of loops** when building collections
-
-### Single Line Print
-
-- **Combine related prints into a single line** when possible
+- Use the ternary operator for simple conditional assignments
+- Use `map`/`filter`/`compactMap` instead of loops when building collections
 
 ### Simplicity First
 

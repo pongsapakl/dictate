@@ -28,26 +28,6 @@ Note that `CODE_SIGN_IDENTITY = "Apple Development"` paired with `DEVELOPMENT_TE
 does **not** build — it fails with "requires a development team". A team must be supplied
 locally; see `.claude/local-notes/`.
 
-### The ANE cache is a separate concern — do not blame signing
-
-*Historical since 2026-09-06: the app no longer ships a CoreML model, so there is no ANE
-cache to rebuild. Kept for the WhisperKit era.*
-
-A slow model load ("loading" for minutes, system-wide lag, `ANECompilerService` pinned) is
-the CoreML Neural Engine cache recompiling, and its known invalidation triggers are: manual
-cache wipes, **macOS build changes** (the cache is keyed by OS build), **disk-pressure
-auto-purge**, and interrupted compiles leaving stale `*.tmp.*.bundle`. Code signature is not
-a known trigger.
-
-A rebuild was once observed coinciding with a deploy, which produced a plausible but
-unsupported signing theory. Check **free disk space** and the OS build key first. Model
-files themselves are never re-downloaded by this.
-
-Superseded claim, retained so it is not rediscovered: that the ANE cache is keyed on
-code signature specifically. The timing matched
-exactly but was never isolated. Confirming it needs two consecutive deploys under stable
-signing — the first rebuilds the cache regardless.
-
 ## The App Is Not Sandboxed — Do Not Re-enable
 
 `Whisper.entitlements` is intentionally empty. Removed 2026-07-26.

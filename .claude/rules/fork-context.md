@@ -2,32 +2,27 @@
 
 ## What This Fork Is
 
-Fork of `soliblue/dictate` for local use. Not intended for distribution, App Store, or
-redistribution.
-
-**This fork:**
-- Targets Apple silicon with constrained RAM; model choices assume that budget
-- May diverge significantly from upstream
+Fork of `soliblue/dictate`, developed independently for personal use on one Mac. Not
+distributed, not on the App Store. Since 2026-10-16 it no longer tracks or contributes to
+upstream; see `git-workflow.md`.
 
 Hardware specifics and operator setup live in `.claude/local-notes/` (untracked).
-See `.claude/rules/publishing-safety.md` before adding anything environment-specific
-to a tracked file.
+See `publishing-safety.md` before adding anything environment-specific to a tracked file.
 
-**This fork is NOT:**
-- A maintained distribution of the original app
-- Tested with Fastlane, TestFlight, or App Store pipeline
-- Intended to stay fully in sync with upstream
+## License
 
-## Relationship to Upstream
+Upstream has no license file (GitHub reports none). With no license, the original code is
+all rights reserved: GitHub's Terms of Service let others view and fork a public repo
+on GitHub, nothing more. Consequences for this fork:
 
-The original `soliblue/dictate` has a full App Store/TestFlight distribution pipeline via Fastlane. This fork does not use or maintain that pipeline. Do not run `fastlane` commands — they are untested and may fail due to different signing config.
+- Keep it as a GitHub fork. Do not re-publish it as a standalone repo.
+- Do not distribute builds (App Store, downloads) without the original author's permission.
+- Personal use of a modified build on one's own machine is the intended scope.
 
-When upstream adds new features, this fork may selectively pull them in or ignore them depending on relevance to local use.
+If distribution ever matters, ask the original author to add a license first.
 
 ## How Builds Work Here
 
-No Fastlane. No TestFlight. Just:
-- Xcode ⌘R to run and test
-- Xcode ⌘B then copy `.app` to `/Applications/` for daily use
-
-See `docs/local-development-guide.md` for full detail.
+- Xcode ⌘R runs the Debug build (`Whisper Dev.app`).
+- The daily app is a Release build copied to `/Applications/`.
+- No Fastlane or TestFlight; the upstream pipeline was removed.

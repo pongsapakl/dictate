@@ -1,27 +1,15 @@
 # Dictate
 
 Voice-to-text dictation for macOS. Hold Right Option to record, release to transcribe and paste.
+Double-tap to latch recording on for hands-free use.
 
-## Whisper (Native Swift App)
+Menu bar app built on Apple's on-device `SpeechAnalyzer` (macOS 26+). No model download, no network.
 
-Production-ready menu bar app using WhisperKit (large-v3 model).
+**Run:** open `Whisper/Whisper.xcodeproj` in Xcode → Run (⌘R). Grant Microphone and Accessibility.
 
-```
-Whisper/
-├── Whisper.xcodeproj
-└── Whisper/
-    └── WhisperApp.swift
-```
+**Custom words:** Engine → Custom Words… opens `Vocabulary.txt`; explicit rewrites go in
+`Replacements.txt` next to it (`wrong phrase => Right Phrase`).
 
-**Run:** Open `Whisper/Whisper.xcodeproj` in Xcode → Run (⌘R)
+**Logs:** `log show --last 1h --predicate 'subsystem == "soli.whisper.Whisper"'`
 
-**First launch:** Downloads model (~1.5GB), grant Microphone + Accessibility permissions.
-
-## python/ (Prototype)
-
-Original Python prototype using MLX Whisper.
-
-```bash
-cd python
-source .venv/bin/activate && python dictate.py
-```
+Forked from [soliblue/dictate](https://github.com/soliblue/dictate), which has no license file.
