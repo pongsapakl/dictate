@@ -79,7 +79,9 @@ The cause was not confirmed; these changes close the likely paths and make the n
   serial queue. If start does not finish in 3s, the dictation is cancelled with a
   "Microphone isn't responding" notification. Because the queue is shared, a stuck call
   ties up only that queue's thread, and later attempts time out behind it instead of
-  piling up. Recovery from a stuck call still needs Restart Whisper.
+  piling up. Recovery from a stuck call still needs Restart Whisper. The timeout path is
+  untested because the stall could not be reproduced on demand. The 3s figure was chosen,
+  not measured: how long a normal start takes is unknown.
 - **Open: release-to-final latency.** First build with the restart-every-time behaviour:
   median 694ms over 8 dictations (4169, 650, 2010, 700, 775, 689, 429, 315) against a
   345ms median over 207 before. Not yet known whether that was the restart or warm-up
