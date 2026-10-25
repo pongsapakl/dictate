@@ -70,6 +70,16 @@ The cause was not confirmed; these changes close the likely paths and make the n
   gone, the dictation finishes with what was heard. A 0 Hz / 0-channel input throws instead
   of crashing. The change was seen ~50ms into every recording on the dev machine; the log
   line records the before/after format to show whether a restart was needed.
+- **Mic setup runs off the main thread, capped at 3s** (2026-10-25). A hang sample caught
+  the main thread spinning at ~35% CPU inside `AVAudioEngine.inputNode` →
+  `AVAudioIOUnit::GetHWFormat` → `AVAEHalUtil::GetSubDevices`. AVFAudio was re-querying
+  CoreAudio in a loop on the first dictation keypress, and it never returned. The likely
+  cause of the earlier hours-long hang, since the symptom matches. Which device state
+  triggers it is unknown. `MicrophoneCapture` now does every engine call on one shared
+  serial queue. If start does not finish in 3s, the dictation is cancelled with a
+  "Microphone isn't responding" notification. Because the queue is shared, a stuck call
+  ties up only that queue's thread, and later attempts time out behind it instead of
+  piling up. Recovery from a stuck call still needs Restart Whisper.
 - **Open: release-to-final latency.** First build with the restart-every-time behaviour:
   median 694ms over 8 dictations (4169, 650, 2010, 700, 775, 689, 429, 315) against a
   345ms median over 207 before. Not yet known whether that was the restart or warm-up

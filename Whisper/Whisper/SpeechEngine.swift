@@ -118,7 +118,10 @@ enum InputDevices {
 
 struct MicrophoneUnavailable: Error {}
 
-final class MicrophoneCapture: @unchecked Sendable {
+struct MicrophoneNotResponding: Error {}
+
+nonisolated final class MicrophoneCapture: @unchecked Sendable {
+    private static let queue = DispatchQueue(label: "soli.whisper.Whisper.microphone")
     private let engine = AVAudioEngine()
     private let lock = NSLock()
     private var frames: [Int16] = []
@@ -127,19 +130,35 @@ final class MicrophoneCapture: @unchecked Sendable {
 
     var capturedFrames: [Int16] { lock.withLock { frames } }
 
-    func start(deviceID: AudioDeviceID?, format: AVAudioFormat, onFailure: @escaping @Sendable () -> Void, onBuffer: @escaping @Sendable (AVAudioPCMBuffer) -> Void) throws {
+    func start(deviceID: AudioDeviceID?, format: AVAudioFormat, timeout: Duration = .seconds(3), onFailure: @escaping @Sendable () -> Void, onBuffer: @escaping @Sendable (AVAudioPCMBuffer) -> Void) async throws {
+        let (outcome, report) = AsyncStream<Result<Void, any Error>>.makeStream()
+        Self.queue.async {
+            report.yield(Result { try self.begin(deviceID: deviceID, format: format, onFailure: onFailure, onBuffer: onBuffer) })
+        }
+        let timer = Task {
+            try await Task.sleep(for: timeout)
+            report.yield(.failure(MicrophoneNotResponding()))
+        }
+        var iterator = outcome.makeAsyncIterator()
+        defer { timer.cancel() }
+        try await iterator.next()?.get()
+    }
+
+    private func begin(deviceID: AudioDeviceID?, format: AVAudioFormat, onFailure: @escaping @Sendable () -> Void, onBuffer: @escaping @Sendable (AVAudioPCMBuffer) -> Void) throws {
         if var deviceID, let unit = engine.inputNode.audioUnit {
             AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &deviceID, UInt32(MemoryLayout<AudioDeviceID>.size))
         }
         try run(format: format, onBuffer: onBuffer)
-        configurationObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
-            guard let self else { return }
-            let current = engine.inputNode.outputFormat(forBus: 0)
-            let needsRestart = !engine.isRunning || current != tapFormat
-            log.notice("audio input changed: running=\(self.engine.isRunning, privacy: .public) format \(self.tapFormat?.sampleRate ?? 0, privacy: .public)Hz/\(self.tapFormat?.channelCount ?? 0, privacy: .public)ch -> \(current.sampleRate, privacy: .public)Hz/\(current.channelCount, privacy: .public)ch restart=\(needsRestart, privacy: .public)")
-            guard needsRestart else { return }
-            engine.inputNode.removeTap(onBus: 0)
-            if (try? run(format: format, onBuffer: onBuffer)) == nil { onFailure() }
+        configurationObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { [weak self] _ in
+            Self.queue.async { [weak self] in
+                guard let self else { return }
+                let current = engine.inputNode.outputFormat(forBus: 0)
+                let needsRestart = !engine.isRunning || current != tapFormat
+                log.notice("audio input changed: running=\(self.engine.isRunning, privacy: .public) format \(self.tapFormat?.sampleRate ?? 0, privacy: .public)Hz/\(self.tapFormat?.channelCount ?? 0, privacy: .public)ch -> \(current.sampleRate, privacy: .public)Hz/\(current.channelCount, privacy: .public)ch restart=\(needsRestart, privacy: .public)")
+                guard needsRestart else { return }
+                engine.inputNode.removeTap(onBus: 0)
+                if (try? run(format: format, onBuffer: onBuffer)) == nil { onFailure() }
+            }
         }
     }
 
@@ -166,10 +185,12 @@ final class MicrophoneCapture: @unchecked Sendable {
     }
 
     func stop() {
-        configurationObserver.map(NotificationCenter.default.removeObserver)
-        configurationObserver = nil
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        Self.queue.async { [self] in
+            configurationObserver.map(NotificationCenter.default.removeObserver)
+            configurationObserver = nil
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+        }
     }
 
     private func append(_ buffer: AVAudioPCMBuffer) {

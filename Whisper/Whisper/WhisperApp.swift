@@ -548,17 +548,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let capture = MicrophoneCapture()
         dictation = session
         microphone = capture
-        do {
-            try capture.start(
-                deviceID: InputDevices.id(named: selectedMicrophone),
-                format: format,
-                onFailure: { [weak self] in Task { @MainActor in self?.microphoneLost() } },
-                onBuffer: { input.yield(AnalyzerInput(buffer: $0)) })
-            log.notice("recording started session=\(self.recordingSessionId, privacy: .public)")
-        } catch {
-            log.error("microphone failed to start: \(error.localizedDescription, privacy: .public)")
-            showNotification(title: "Whisper", message: "Microphone failed to start.")
-            stopRecording(cancel: true)
+        Task {
+            do {
+                try await capture.start(
+                    deviceID: InputDevices.id(named: selectedMicrophone),
+                    format: format,
+                    onFailure: { [weak self] in Task { @MainActor [self] in self?.microphoneLost() } },
+                    onBuffer: { input.yield(AnalyzerInput(buffer: $0)) })
+                log.notice("recording started session=\(self.recordingSessionId, privacy: .public)")
+            } catch {
+                log.error("microphone failed to start: \(String(describing: error), privacy: .public)")
+                showNotification(title: "Whisper", message: error is MicrophoneNotResponding
+                    ? "Microphone isn't responding. If it keeps happening, use Restart Whisper in the menu."
+                    : "Microphone failed to start.")
+                guard microphone === capture else { return }
+                stopRecording(cancel: true)
+            }
         }
     }
 
